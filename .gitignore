@@ -1,0 +1,68 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- uv ---
+.uv/
+
+# --- Environment files (CRITICAL - contains API keys) ---
+.env
+.env.local
+.env.*.local
+
+# --- LanceDB data (chunks of vault contents) ---
+data/
+*.lance/
+lancedb_data/
+
+# --- Embedding/model caches ---
+.cache/
+models/
+.huggingface/
+
+# --- Logs ---
+*.log
+logs/
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Streamlit ---
+.streamlit/secrets.toml
+
+# --- Eval data (may contain real company names) ---
+rag/eval/eval_set.yaml
+rag/eval/results/
+
+# --- Obsidian vault must NEVER be committed ---
+Obsidian_KRUN_Antonio/
+vault/
+*.md.backup
+
+# --- Node (for Phase 2 Obsidian plugin) ---
+node_modules/
+obsidian-plugin/main.js
+obsidian-plugin/dist/
+
+# --- OS ---
+desktop.ini

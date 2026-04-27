@@ -1,0 +1,85 @@
+# =============================================================================
+# KRUN RAG Chatbot — Application Configuration
+# Override any field via environment variables (see .env.example).
+# =============================================================================
+
+# --- Vault paths -------------------------------------------------------------
+vault:
+  # Absolute path to the Obsidian vault root (Windows or WSL).
+  path: "C:\\Users\\anton\\Documents\\Obsidian_KRUN_Antonio"
+
+  # Subfolders to index (relative to vault.path). Empty list = whole vault.
+  include_dirs:
+    - "03_Companies"
+    - "02_Persons"
+    - "04_Meetings"
+    - "06_Resources"
+
+  # Folders/patterns to ignore.
+  exclude_patterns:
+    - ".obsidian/"
+    - ".trash/"
+    - "_attachments/"   # 첨부 별도 처리 (attachment_loader)
+    - "**/*.canvas"
+
+# --- Storage -----------------------------------------------------------------
+storage:
+  lancedb_path: "./data/lancedb"
+  table_name: "vault_chunks"
+
+# --- Embedding model ---------------------------------------------------------
+embedding:
+  model_name: "BAAI/bge-m3"
+  dimension: 1024
+  batch_size: 32
+  device: "auto"          # "cuda" | "cpu" | "auto"
+  max_seq_length: 8192
+
+# --- Chunking ---------------------------------------------------------------
+chunking:
+  strategy: "header_aware"   # "header_aware" | "sliding"
+  max_tokens: 800
+  overlap_tokens: 80
+  min_tokens: 50
+  preserve_breadcrumb: true  # Keep "H1 > H2 > H3" prefix in each chunk
+
+# --- BM25 / Korean tokenization (Phase 1A experiment) -----------------------
+bm25:
+  # "char_trigram" -> simple, no extra deps, ~80% of morphological accuracy
+  # "kiwipiepy"    -> Korean morphological analyzer, ~100MB model
+  # "lancedb_fts"  -> use LanceDB built-in Tantivy full-text search
+  tokenizer: "char_trigram"
+  k1: 1.5
+  b: 0.75
+
+# --- Retrieval ---------------------------------------------------------------
+retrieval:
+  bm25_top_k: 30
+  vector_top_k: 30
+  rrf_k: 60               # Reciprocal Rank Fusion constant
+  final_top_k: 8          # Chunks sent to the generator
+  reranker_enabled: false # Phase 1D toggle
+  reranker_model: "BAAI/bge-reranker-v2-m3"
+
+# --- Generation --------------------------------------------------------------
+generation:
+  gen_model: "claude-sonnet-4-6"
+  analyzer_model: "claude-haiku-4-5-20251001"
+  max_tokens: 2048
+  temperature: 0.2
+  stream: true
+  prompt_caching: true    # cache_control: ephemeral on system prompt
+  zdr_enabled: false      # Toggle once Anthropic enrollment confirmed
+
+# --- Watcher (Phase 1D) -----------------------------------------------------
+watcher:
+  enabled: false
+  debounce_seconds: 2.0
+  ignore_patterns:
+    - ".obsidian/"
+    - "*.tmp"
+
+# --- Logging -----------------------------------------------------------------
+logging:
+  level: "INFO"
+  file: null              # null = stdout only
