@@ -129,13 +129,25 @@ def render_sidebar() -> dict[str, Any]:
             value=True,
             help="OFF로 두면 사이드바 필터만 사용 (검색 ~1초 빨라짐)",
         )
+        use_reranker = st.toggle(
+            "리랭커 (bge-reranker-v2-m3)",
+            value=s.retrieval.reranker_enabled,
+            help="ON이면 cross-encoder가 top-30을 재랭크. CPU에서 +200ms, 정확도 ↑.",
+        )
         show_search_details = st.toggle("검색 세부 정보 표시", value=False)
         top_k = st.slider("최종 청크 개수 (top-K)", 4, 20, value=s.retrieval.final_top_k)
 
         st.divider()
         st.subheader("관리")
-        reindex_metadata = st.button("📥 메타데이터 새로고침", help="임베딩 재사용, ~1분")
-        rebuild_bm25 = st.button("🔄 BM25 인덱스 재구축", help="BM25 사이드카만 다시 빌드")
+        incremental_btn = st.button(
+            "🔄 신규/변경 노트 인덱싱",
+            help="신규·변경·삭제된 노트만 감지해서 인덱싱 (보통 수 초~1분)",
+        )
+        reindex_metadata = st.button(
+            "📥 메타데이터만 새로고침",
+            help="기존 행 메타데이터만 재추출 (임베딩 재사용, ~1분)",
+        )
+        rebuild_bm25 = st.button("🧮 BM25 인덱스 재구축", help="BM25 사이드카만 다시 빌드")
 
         st.divider()
         st.subheader("세션 통계")
@@ -154,6 +166,24 @@ def render_sidebar() -> dict[str, Any]:
         st.caption(f"ZDR: {'ON' if s.generation.zdr_enabled else 'OFF'}")
 
     # Trigger admin actions outside the with block (Streamlit reruns on click).
+    if incremental_btn:
+        from rag.ingest.pipeline import index_incremental
+
+        with st.spinner("신규/변경 노트 인덱싱 중..."):
+            stats_run, diff = index_incremental()
+        msg = (
+            f"신규 {len(diff.new)} · 변경 {len(diff.changed)} · "
+            f"삭제 {len(diff.deleted)} · 청크 {stats_run.chunks_total} "
+            f"({stats_run.elapsed_seconds:.1f}s)"
+        )
+        if not (diff.new or diff.changed or diff.deleted):
+            st.info("변경 사항이 없습니다.")
+        else:
+            st.success(msg)
+        cached_store.clear()
+        cached_bm25.clear()
+        st.rerun()
+
     if reindex_metadata:
         from rag.ingest.pipeline import refresh_metadata as _refresh
 
@@ -181,6 +211,7 @@ def render_sidebar() -> dict[str, Any]:
         "date_from": sb_date_from.isoformat() if isinstance(sb_date_from, date) else None,
         "date_to": sb_date_to.isoformat() if isinstance(sb_date_to, date) else None,
         "use_analyzer": use_analyzer,
+        "use_reranker": use_reranker,
         "show_search_details": show_search_details,
         "top_k": top_k,
     }
@@ -271,8 +302,14 @@ def handle_query(query: str, sidebar: dict) -> None:
         analysis = _merge_filters(analysis, sidebar)
 
         # 2b. Search
-        with st.spinner("🔎 하이브리드 검색..."):
-            cfg = settings.retrieval.model_copy(update={"final_top_k": sidebar["top_k"]})
+        spinner_label = "🔎 하이브리드 검색 + 리랭크..." if sidebar["use_reranker"] else "🔎 하이브리드 검색..."
+        with st.spinner(spinner_label):
+            cfg = settings.retrieval.model_copy(
+                update={
+                    "final_top_k": sidebar["top_k"],
+                    "reranker_enabled": sidebar["use_reranker"],
+                }
+            )
             result = hybrid_search(
                 query=query,
                 analysis=analysis,
@@ -298,6 +335,8 @@ def handle_query(query: str, sidebar: dict) -> None:
                         "bm25_hits": result.bm25_hit_count,
                         "vector_hits": result.vector_hit_count,
                         "fused_top_k": result.fused_count,
+                        "reranked": result.reranked,
+                        "rerank_pool_size": result.rerank_pool_size,
                     }
                 )
 

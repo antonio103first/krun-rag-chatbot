@@ -140,17 +140,31 @@ uv run streamlit run apps/streamlit_app.py
 ### 노트가 추가되거나 수정되면
 
 ```powershell
-# 옵션 1: 메타데이터만 새로고침 (임베딩 재사용, ~1분)
+# 권장: 신규/변경/삭제된 파일만 자동 감지해서 인덱싱 (수 초~1분)
+uv run python -m rag.ingest.pipeline --incremental
+
+# 메타데이터만 새로고침 (기존 임베딩 재사용, ~1분)
 uv run python -m rag.ingest.pipeline --refresh-metadata
 
-# 옵션 2: 특정 파일만 다시 인덱싱
-uv run python -m rag.ingest.pipeline --paths "C:\Users\anton\Documents\Obsidian_KRUN_Antonio\03_Companies\X\X.md"
+# 특정 파일만 다시 인덱싱
+uv run python -m rag.ingest.pipeline --paths "C:\Users\anton\...\X.md"
 
-# 옵션 3: 전체 재인덱싱 (BGE-M3 CPU에서 ~25분)
+# 전체 재인덱싱 (BGE-M3 CPU에서 ~25분)
 uv run python -m rag.ingest.pipeline --full
 ```
 
-또는 Streamlit 사이드바의 **📥 메타데이터 새로고침** 버튼 사용.
+또는 Streamlit 사이드바의 **🔄 신규/변경 노트 인덱싱** 버튼 사용.
+
+### 리랭커 (선택, 정확도 +10~15%)
+
+```powershell
+# 의존성 설치 (FlagEmbedding ~600MB)
+uv sync --extra rerank
+
+# config.yaml에서 `reranker_enabled: true` 또는 Streamlit 토글로 사용
+```
+
+리랭커 ON시 검색당 +200ms (CPU) 부하가 발생하지만 Recall@8이 보통 0.10-0.15 향상됩니다.
 
 ---
 

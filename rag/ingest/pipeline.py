@@ -5,6 +5,7 @@ CLI:
     uv run python -m rag.ingest.pipeline --paths path/to/note.md
     uv run python -m rag.ingest.pipeline --dry-run
     uv run python -m rag.ingest.pipeline --refresh-metadata
+    uv run python -m rag.ingest.pipeline --incremental
 """
 
 from __future__ import annotations
@@ -13,7 +14,8 @@ import argparse
 import sys
 import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -256,6 +258,128 @@ def refresh_metadata(
     return stats
 
 
+# --- Incremental change detection ----------------------------------------
+@dataclass
+class VaultDiff:
+    new: list[Path] = field(default_factory=list)
+    changed: list[Path] = field(default_factory=list)
+    deleted: list[str] = field(default_factory=list)  # absolute file_path strings
+
+
+def _parse_ingested_at(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        # `datetime.utcnow().isoformat()` produced naive UTC strings.
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def detect_vault_changes(
+    settings: Settings | None = None,
+    store: VaultChunkStore | None = None,
+) -> VaultDiff:
+    """Diff the vault against LanceDB to find what's new / changed / deleted.
+
+    A file is **new** if it's in the vault but not in any existing row.
+    **changed** if the on-disk mtime is newer than the most-recent
+    `ingested_at` of any of its chunks. **deleted** if it has rows in
+    LanceDB but no longer exists on disk.
+    """
+    settings = settings or get_settings()
+    store = store or open_store()
+    vault_root = settings.vault.resolved_path
+
+    vault_paths = list_vault_md(
+        vault_root=vault_root,
+        include_dirs=settings.vault.include_dirs,
+        exclude_patterns=settings.vault.exclude_patterns,
+    )
+    vault_set = {str(p): p for p in vault_paths}
+
+    df = store.table.to_pandas()
+    diff = VaultDiff()
+
+    if df.empty:
+        diff.new = list(vault_set.values())
+        return diff
+
+    # Most-recent ingested_at per file.
+    last_seen: dict[str, str] = (
+        df.groupby("file_path")["ingested_at"].max().to_dict()
+    )
+
+    db_set = set(last_seen.keys())
+    for fp_str, p in vault_set.items():
+        if fp_str not in db_set:
+            diff.new.append(p)
+            continue
+        try:
+            mtime = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)
+        except OSError:
+            continue
+        ingested = _parse_ingested_at(last_seen[fp_str])
+        if ingested is None or mtime > ingested:
+            diff.changed.append(p)
+
+    for fp_str in db_set:
+        if fp_str not in vault_set:
+            diff.deleted.append(fp_str)
+
+    return diff
+
+
+def index_incremental(
+    *,
+    settings: Settings | None = None,
+    store: VaultChunkStore | None = None,
+    embedder: Embedder | None = None,
+    show_progress: bool = True,
+    dry_run: bool = False,
+) -> tuple[IngestStats, VaultDiff]:
+    """Detect new/changed/deleted files and reindex only what's needed.
+
+    Returns the ingest stats plus the diff (so callers know what was deleted).
+    """
+    settings = settings or get_settings()
+    store = store or open_store()
+
+    diff = detect_vault_changes(settings=settings, store=store)
+    targets = diff.new + diff.changed
+
+    if dry_run:
+        stats = IngestStats()
+        stats.files_seen = len(targets)
+        stats.files_indexed = len(targets)
+        return stats, diff
+
+    # Delete vanished files first so their stale chunks don't show in search.
+    for fp in diff.deleted:
+        try:
+            store.delete_by_file(fp)
+        except Exception as e:
+            tqdm.write(f"  [delete fail] {fp}: {e!r}")
+
+    if not targets:
+        stats = IngestStats()
+        stats.elapsed_seconds = 0.0
+        return stats, diff
+
+    stats = index_files(
+        targets,
+        settings=settings,
+        store=store,
+        embedder=embedder,
+        show_progress=show_progress,
+        dry_run=False,
+    )
+    return stats, diff
+
+
 def _print_stats(stats: IngestStats, dry_run: bool = False) -> None:
     print("=" * 60)
     print("Ingest summary" + (" (DRY RUN)" if dry_run else ""))
@@ -283,6 +407,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Re-derive metadata for existing rows without re-embedding (fast)",
     )
+    g.add_argument(
+        "--incremental",
+        action="store_true",
+        help="Detect new + changed + deleted files since last ingest and reindex only those",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -295,6 +424,32 @@ def main(argv: list[str] | None = None) -> int:
         stats = index_full_vault(show_progress=not args.no_progress, dry_run=args.dry_run)
     elif args.refresh_metadata:
         stats = refresh_metadata(show_progress=not args.no_progress)
+    elif args.incremental:
+        stats, diff = index_incremental(
+            show_progress=not args.no_progress, dry_run=args.dry_run
+        )
+        print(
+            f"\n[diff] new={len(diff.new)}  changed={len(diff.changed)}  "
+            f"deleted={len(diff.deleted)}"
+        )
+        if diff.new:
+            print("  new files:")
+            for p in diff.new[:10]:
+                print(f"    + {p.name}")
+            if len(diff.new) > 10:
+                print(f"    + … ({len(diff.new) - 10} more)")
+        if diff.changed:
+            print("  changed files:")
+            for p in diff.changed[:10]:
+                print(f"    ~ {p.name}")
+            if len(diff.changed) > 10:
+                print(f"    ~ … ({len(diff.changed) - 10} more)")
+        if diff.deleted:
+            print("  deleted files (chunks dropped):")
+            for fp in diff.deleted[:10]:
+                print(f"    - {Path(fp).name}")
+            if len(diff.deleted) > 10:
+                print(f"    - … ({len(diff.deleted) - 10} more)")
     else:
         paths = [Path(p).resolve() for p in args.paths]
         stats = index_files(paths, show_progress=not args.no_progress, dry_run=args.dry_run)

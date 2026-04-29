@@ -1,11 +1,13 @@
-"""Hybrid retrieval: BM25 ∪ ANN, fused by Reciprocal Rank Fusion.
+"""Hybrid retrieval: BM25 ∪ ANN, fused by Reciprocal Rank Fusion (+ optional rerank).
 
 Pipeline:
 1. Translate the QueryAnalysis filters into a LanceDB SQL `where` clause.
 2. Run BM25 on the chunk corpus (top `bm25_top_k`).
 3. Run ANN vector search with the same `where` (top `vector_top_k`).
 4. Apply the same `where` to BM25 hits post-hoc (BM25 has no metadata index).
-5. Reciprocal-rank-fuse the two ranked lists, return the final top-K rows.
+5. Reciprocal-rank-fuse the two ranked lists.
+6. If `reranker_enabled`, score the fused pool with a cross-encoder and
+   reorder. Otherwise truncate to `final_top_k` directly.
 """
 
 from __future__ import annotations
@@ -29,6 +31,8 @@ class HybridSearchResult:
     bm25_hit_count: int
     vector_hit_count: int
     fused_count: int
+    reranked: bool = False
+    rerank_pool_size: int = 0
 
 
 # --- WHERE clause builder --------------------------------------------------
@@ -84,10 +88,11 @@ def hybrid_search(
     store: VaultChunkStore | None = None,
     bm25: BM25Index | None = None,
     embedder: Embedder | None = None,
+    reranker: object | None = None,  # rag.retrieval.reranker.Reranker
     settings: RetrievalConfig | None = None,
     where_override: str | None = None,
 ) -> HybridSearchResult:
-    """Run hybrid retrieval and return the top-K LanceDB rows."""
+    """Run hybrid retrieval (+ optional rerank) and return the final top-K rows."""
     s = get_settings()
     cfg = settings or s.retrieval
     store = store or open_store()
@@ -113,7 +118,6 @@ def hybrid_search(
 
     # 3. Apply WHERE to BM25 results post-hoc (BM25 has no metadata index).
     if where and bm25_ids:
-        # LanceDB IN clauses cap somewhere; chunk to be safe.
         kept_ids: set[str] = set()
         for batch in _batched(bm25_ids, 500):
             clause = "chunk_id IN ({}) AND ({})".format(
@@ -125,8 +129,23 @@ def hybrid_search(
 
     # 4. Fuse
     if not bm25_ids and not vector_ids:
-        return HybridSearchResult(rows=[], where_clause=where, bm25_hit_count=0, vector_hit_count=0, fused_count=0)
-    fused = rrf_fuse([bm25_ids, vector_ids], k=cfg.rrf_k, top_k=cfg.final_top_k)
+        return HybridSearchResult(
+            rows=[], where_clause=where,
+            bm25_hit_count=0, vector_hit_count=0, fused_count=0,
+        )
+
+    # When the reranker is on, we fuse to a *bigger* candidate pool than
+    # `final_top_k` so the cross-encoder has more signal to work with.
+    use_reranker = bool(getattr(cfg, "reranker_enabled", False))
+    if use_reranker and reranker is None:
+        try:
+            from rag.retrieval.reranker import get_default_reranker
+            reranker = get_default_reranker()
+        except ImportError:
+            use_reranker = False  # FlagEmbedding not installed; gracefully fall back
+
+    pool_size = max(cfg.bm25_top_k, cfg.vector_top_k) if use_reranker else cfg.final_top_k
+    fused = rrf_fuse([bm25_ids, vector_ids], k=cfg.rrf_k, top_k=pool_size)
     fused_ids = [cid for cid, _ in fused]
 
     # 5. Hydrate full rows for the fused IDs.
@@ -135,7 +154,19 @@ def hybrid_search(
         clause = "chunk_id IN ({})".format(", ".join(f"'{_q(c)}'" for c in batch))
         for r in store.search_by_filter(clause, limit=len(batch)):
             rows_by_id[r["chunk_id"]] = r
-    ordered = [rows_by_id[cid] for cid in fused_ids if cid in rows_by_id]
+    pool = [rows_by_id[cid] for cid in fused_ids if cid in rows_by_id]
+
+    # 6. Optional cross-encoder rerank on the fused pool.
+    if use_reranker and pool:
+        passages = [r.get("text") or "" for r in pool]
+        try:
+            ranked = reranker.rerank(rewritten, passages, top_k=cfg.final_top_k)  # type: ignore[union-attr]
+            ordered = [pool[i] for i, _ in ranked]
+        except Exception:
+            ordered = pool[: cfg.final_top_k]
+            use_reranker = False
+    else:
+        ordered = pool[: cfg.final_top_k]
 
     return HybridSearchResult(
         rows=ordered,
@@ -143,6 +174,8 @@ def hybrid_search(
         bm25_hit_count=len(bm25_hits),
         vector_hit_count=len(vector_rows),
         fused_count=len(ordered),
+        reranked=use_reranker,
+        rerank_pool_size=len(pool) if use_reranker else 0,
     )
 
 
