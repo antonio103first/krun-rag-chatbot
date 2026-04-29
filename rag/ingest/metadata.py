@@ -103,17 +103,43 @@ def _coerce_date(v: Any) -> date | None:
 def _coerce_str(v: Any) -> str | None:
     if v is None or v == "":
         return None
-    return str(v).strip() or None
+    s = str(v).strip()
+    return _unwrap_wikilink(s) or None
 
 
 def _coerce_str_list(v: Any) -> list[str]:
     if v is None:
         return []
     if isinstance(v, str):
-        return [v.strip()] if v.strip() else []
+        unwrapped = _unwrap_wikilink(v.strip())
+        return [unwrapped] if unwrapped else []
     if isinstance(v, (list, tuple)):
-        return [str(x).strip() for x in v if x is not None and str(x).strip()]
+        out: list[str] = []
+        for x in v:
+            if x is None:
+                continue
+            s = _unwrap_wikilink(str(x).strip())
+            if s:
+                out.append(s)
+        return out
     return [str(v).strip()]
+
+
+_WIKILINK_FORM_RE = re.compile(r"^\[\[([^|\]\n]+?)(?:\|([^\]\n]+?))?\]\]$")
+
+
+def _unwrap_wikilink(s: str) -> str:
+    """Strip Obsidian wikilink wrapper if the value is exactly `[[Target]]` or `[[Target|Display]]`.
+
+    Frontmatter values like `company: [[수호아이오]]` should be stored as `수호아이오`,
+    otherwise metadata filters (`company = '수호아이오'`) miss them.
+    """
+    if not s:
+        return s
+    m = _WIKILINK_FORM_RE.match(s)
+    if m:
+        return (m.group(2) or m.group(1)).strip()
+    return s
 
 
 # --- Output dataclass ------------------------------------------------------

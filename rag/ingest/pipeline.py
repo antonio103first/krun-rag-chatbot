@@ -4,6 +4,7 @@ CLI:
     uv run python -m rag.ingest.pipeline --full
     uv run python -m rag.ingest.pipeline --paths path/to/note.md
     uv run python -m rag.ingest.pipeline --dry-run
+    uv run python -m rag.ingest.pipeline --refresh-metadata
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 from tqdm import tqdm
 
 from rag.config import Settings, get_settings
@@ -175,6 +177,85 @@ def index_full_vault(
     return index_files(paths, settings=settings, show_progress=show_progress, dry_run=dry_run)
 
 
+def refresh_metadata(
+    *,
+    settings: Settings | None = None,
+    store: VaultChunkStore | None = None,
+    show_progress: bool = True,
+) -> IngestStats:
+    """Re-derive metadata for every existing row without re-embedding.
+
+    Useful when only the metadata extraction logic (`metadata.py`) has
+    changed: we keep the stored chunk text + vector untouched and rewrite
+    the structured fields (doc_type, company, person, date, …).
+    """
+    settings = settings or get_settings()
+    store = store or open_store()
+    vault_root = settings.vault.resolved_path
+
+    df = store.table.to_pandas()
+    stats = IngestStats()
+    started = time.perf_counter()
+
+    if df.empty:
+        stats.elapsed_seconds = time.perf_counter() - started
+        return stats
+
+    file_paths = df["file_path"].dropna().unique().tolist()
+    iterator = tqdm(file_paths, desc="refreshing", disable=not show_progress)
+    new_rows: list[dict] = []
+
+    for fp in iterator:
+        path = Path(fp)
+        stats.files_seen += 1
+        if not path.exists():
+            stats.files_skipped += 1
+            tqdm.write(f"  [missing] {fp}")
+            continue
+        try:
+            note = load_note(path, vault_root=vault_root)
+            meta = derive_metadata(note)
+        except Exception as e:
+            stats.files_with_errors += 1
+            tqdm.write(f"  [refresh fail] {path.name}: {e!r}")
+            continue
+
+        meta_dict = meta.as_lance_row_partial()
+        file_chunks = df[df["file_path"] == fp]
+        for _, row in file_chunks.iterrows():
+            vec = row["vector"]
+            if isinstance(vec, np.ndarray):
+                vec_list = vec.tolist()
+            else:
+                vec_list = list(vec)
+
+            chunk_idx_raw = row["chunk_idx"]
+            chunk_idx = int(chunk_idx_raw.item()) if hasattr(chunk_idx_raw, "item") else int(chunk_idx_raw)
+
+            new_row = chunk_to_row(
+                chunk_meta=meta_dict,
+                chunk_text=row["text"],
+                vector=vec_list,
+                chunk_id=row["chunk_id"],
+                chunk_idx=chunk_idx,
+                header_path=row.get("header_path") or "",
+                raw_frontmatter=meta.raw_frontmatter,
+                source=row.get("source") or "md",
+                parent_path=row.get("parent_path") if row.get("parent_path") else None,
+            )
+            new_rows.append(new_row)
+            stats.chunks_total += 1
+            stats.chunks_per_doc_type[meta_dict["doc_type"]] += 1
+
+        stats.files_indexed += 1
+
+    if new_rows:
+        store.upsert_rows(new_rows)
+
+    stats.elapsed_seconds = time.perf_counter() - started
+    return stats
+
+
 def _print_stats(stats: IngestStats, dry_run: bool = False) -> None:
     print("=" * 60)
     print("Ingest summary" + (" (DRY RUN)" if dry_run else ""))
@@ -197,6 +278,11 @@ def main(argv: list[str] | None = None) -> int:
     g = parser.add_mutually_exclusive_group(required=True)
     g.add_argument("--full", action="store_true", help="Reindex the entire vault")
     g.add_argument("--paths", nargs="+", help="Index only these .md files (absolute or relative to cwd)")
+    g.add_argument(
+        "--refresh-metadata",
+        action="store_true",
+        help="Re-derive metadata for existing rows without re-embedding (fast)",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -207,6 +293,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.full:
         stats = index_full_vault(show_progress=not args.no_progress, dry_run=args.dry_run)
+    elif args.refresh_metadata:
+        stats = refresh_metadata(show_progress=not args.no_progress)
     else:
         paths = [Path(p).resolve() for p in args.paths]
         stats = index_files(paths, show_progress=not args.no_progress, dry_run=args.dry_run)
