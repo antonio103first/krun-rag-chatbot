@@ -34,6 +34,7 @@ vault:
     - "_Templates/"
     - "copilot/"
     - "**/*.canvas"
+    - "**/sortspec.md"      # Obsidian sort-order plugin file
 
 # --- Storage -----------------------------------------------------------------
 storage:
