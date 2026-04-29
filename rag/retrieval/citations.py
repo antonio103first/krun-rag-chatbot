@@ -11,9 +11,26 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote
 
 from rag.config import get_settings
+
+
+def _clean_str(v: Any) -> str | None:
+    """Coerce a pandas/LanceDB scalar to `str | None`, handling NaN.
+
+    LanceDB nullable columns come back from `to_pandas()` as `float('nan')`
+    when the value is null. NaN is truthy in Python (`if nan:` -> True), so
+    callers that do `if c.company:` would silently flow a float into a join
+    or f-string. Normalize to None here at the boundary.
+    """
+    if v is None:
+        return None
+    if isinstance(v, float) and v != v:  # NaN != NaN
+        return None
+    s = str(v).strip()
+    return s or None
 
 
 @dataclass
@@ -61,33 +78,39 @@ def build_obsidian_uri(vault_relative: str, vault_name: str | None = None) -> st
 
 
 def build_citations(rows: list[dict], vault_name: str | None = None) -> list[Citation]:
-    """Turn LanceDB result rows into ordered Citation objects."""
+    """Turn LanceDB result rows into ordered Citation objects.
+
+    Every nullable string field is funneled through `_clean_str` so NaN
+    sentinels (from LanceDB null columns) become None instead of float NaN.
+    """
     name = vault_name or vault_name_from_settings()
     out: list[Citation] = []
     for n, r in enumerate(rows, start=1):
-        rel = r.get("vault_relative") or ""
+        rel = _clean_str(r.get("vault_relative")) or ""
         date_val = r.get("date")
-        if hasattr(date_val, "isoformat"):
-            date_str: str | None = date_val.isoformat()
+        if isinstance(date_val, float) and date_val != date_val:
+            date_str: str | None = None
+        elif hasattr(date_val, "isoformat"):
+            date_str = date_val.isoformat()
         elif date_val:
             date_str = str(date_val)
         else:
             date_str = None
-        text_full = (r.get("text") or "").strip()
+        text_full = (_clean_str(r.get("text")) or "").strip()
         snippet = text_full.replace("\n", " ")
         if len(snippet) > 240:
             snippet = snippet[:240] + "…"
         out.append(
             Citation(
                 n=n,
-                chunk_id=r.get("chunk_id") or "",
-                title=r.get("title") or Path(rel).stem,
+                chunk_id=_clean_str(r.get("chunk_id")) or "",
+                title=_clean_str(r.get("title")) or Path(rel).stem,
                 vault_relative=rel,
-                header_path=r.get("header_path") or "",
+                header_path=_clean_str(r.get("header_path")) or "",
                 obsidian_uri=build_obsidian_uri(rel, vault_name=name),
-                doc_type=r.get("doc_type") or "other",
-                company=r.get("company"),
-                person=r.get("person"),
+                doc_type=_clean_str(r.get("doc_type")) or "other",
+                company=_clean_str(r.get("company")),
+                person=_clean_str(r.get("person")),
                 date=date_str,
                 snippet=snippet,
                 text_full=text_full,

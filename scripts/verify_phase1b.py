@@ -121,7 +121,8 @@ def main(argv: list[str] | None = None) -> int:
         coverage_ok = bool(cites_in_answer)
         print(
             f"   generate: {gen.output_tokens} out tokens  ({gen_elapsed:.1f}s)  "
-            f"input={gen.input_tokens}  cache_read={gen.cache_read_tokens}"
+            f"input={gen.input_tokens}  cache_write={gen.cache_creation_tokens}  "
+            f"cache_read={gen.cache_read_tokens}"
         )
         print(f"   citations in answer: {sorted(cites_in_answer) or '(none)'}")
         print(f"   stop_reason: {gen.stop_reason}")

@@ -193,10 +193,13 @@ def main(argv: list[str] | None = None) -> int:
     _print_sources(citations)
 
     elapsed = time.perf_counter() - started
+    cache_hit_pct = (
+        100 * gen.cache_read_tokens / max(gen.input_tokens + gen.cache_read_tokens, 1)
+    )
     print(
         f"\n[usage] input={gen.input_tokens}  output={gen.output_tokens}  "
         f"cache_write={gen.cache_creation_tokens}  cache_read={gen.cache_read_tokens}  "
-        f"elapsed={elapsed:.1f}s"
+        f"({cache_hit_pct:.0f}% cached)  elapsed={elapsed:.1f}s"
     )
     return 0
 
