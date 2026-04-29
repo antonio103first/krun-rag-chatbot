@@ -195,8 +195,10 @@ class VaultChunkStore:
         return before - table.count_rows()
 
     def all_file_paths(self) -> list[str]:
-        df = self.table.to_pandas(columns=["file_path"])
-        return sorted(set(df["file_path"].tolist())) if len(df) else []
+        df = self.table.to_pandas()
+        if len(df) == 0 or "file_path" not in df.columns:
+            return []
+        return sorted(set(df["file_path"].tolist()))
 
     # --- Reads ---------------------------------------------------------
     def search_by_company(self, company: str, limit: int = 10) -> list[dict[str, Any]]:

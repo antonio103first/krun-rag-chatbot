@@ -55,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # --- doc_type breakdown -------------------------------------------
-    df = store.table.to_pandas(columns=["doc_type", "company", "person", "top_folder"])
+    df = store.table.to_pandas()[["doc_type", "company", "person", "top_folder"]]
     counts: Counter[str] = Counter(df["doc_type"].fillna("").tolist())
     print("\n[2] doc_type distribution:")
     for k, v in counts.most_common():
