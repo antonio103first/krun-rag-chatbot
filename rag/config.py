@@ -103,7 +103,7 @@ class RetrievalConfig(BaseModel):
 
 class GenerationConfig(BaseModel):
     gen_model: str = "claude-sonnet-4-6"
-    analyzer_model: str = "claude-haiku-4-5-20251001"
+    analyzer_model: str = "claude-haiku-4-5"
     max_tokens: int = 2048
     temperature: float = 0.2
     stream: bool = True

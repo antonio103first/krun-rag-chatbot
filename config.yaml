@@ -78,7 +78,7 @@ retrieval:
 # --- Generation --------------------------------------------------------------
 generation:
   gen_model: "claude-sonnet-4-6"
-  analyzer_model: "claude-haiku-4-5-20251001"
+  analyzer_model: "claude-haiku-4-5"
   max_tokens: 2048
   temperature: 0.2
   stream: true
