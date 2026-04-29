@@ -10,16 +10,29 @@ vault:
 
   # Subfolders to index (relative to vault.path). Empty list = whole vault.
   include_dirs:
-    - "03_Companies"
+    - "00_Inbox"
+    - "01_Daily"
+    - "01a_Periodic"
     - "02_Persons"
+    - "03_Companies"
     - "04_Meetings"
+    - "05_Projects"
     - "06_Resources"
 
   # Folders/patterns to ignore.
   exclude_patterns:
     - ".obsidian/"
+    - ".makemd/"
+    - ".smart-env/"
+    - ".space/"
     - ".trash/"
-    - "_attachments/"   # 첨부 별도 처리 (attachment_loader)
+    - "07_Archive/"        # 사용자 제외 결정
+    - "08_회의록/"          # STT 변환본 (04_Meetings로 정본 관리)
+    - "_attachments/"       # 첨부 별도 처리 (attachment_loader)
+    - "_automation/"
+    - "_backup_*/"          # 백업 폴더 (날짜 변형 대응)
+    - "_Templates/"
+    - "copilot/"
     - "**/*.canvas"
 
 # --- Storage -----------------------------------------------------------------
