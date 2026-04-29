@@ -101,7 +101,56 @@ krun-rag-chatbot/
 
 ## 다음 단계
 
-Phase 0 Gate 통과 후 → [`claude.md`의 Phase 1A](./claude.md#phase-1a--ingest-core-day-2-4) 진행.
+Phase 0/1A/1B Gate 통과 후 → **Phase 1C** 진입 (Streamlit MVP).
+
+---
+
+## 일상 사용법 (Phase 1B 이상)
+
+### CLI로 한 번 질문 (빠름)
+
+```powershell
+uv run python -m rag.query "Blueward 1차DD 핵심 리스크"
+uv run python -m rag.query "지난주 미팅 액션아이템"
+uv run python -m rag.query "강규식 상무 미팅 이력"
+
+# 분석기 OFF (Haiku 호출 생략, ~1초 빨라짐)
+uv run python -m rag.query --no-analyze "Blueward 핵심 리스크"
+
+# JSON 출력 (다른 툴과 연동)
+uv run python -m rag.query --json "케이런 7호 펀드 관련 회사"
+```
+
+### Streamlit 채팅 UI (Phase 1C)
+
+```powershell
+uv run streamlit run apps/streamlit_app.py
+```
+
+브라우저가 자동으로 열리거나 http://localhost:8501 로 접속.
+
+기능:
+- 채팅 히스토리 + 스트리밍 답변
+- 사이드바 필터: 문서 유형 / 회사 / 인물 / 날짜 범위 / top-K
+- 인용 expander: 청크 미리보기 + `obsidian://` "노트 열기" 버튼
+- 메타데이터 / BM25 재인덱싱 버튼
+- 세션 누적 토큰 + 예상 비용 ($)
+- 캐시 적중률 표시 (90%+ 면 정상)
+
+### 노트가 추가되거나 수정되면
+
+```powershell
+# 옵션 1: 메타데이터만 새로고침 (임베딩 재사용, ~1분)
+uv run python -m rag.ingest.pipeline --refresh-metadata
+
+# 옵션 2: 특정 파일만 다시 인덱싱
+uv run python -m rag.ingest.pipeline --paths "C:\Users\anton\Documents\Obsidian_KRUN_Antonio\03_Companies\X\X.md"
+
+# 옵션 3: 전체 재인덱싱 (BGE-M3 CPU에서 ~25분)
+uv run python -m rag.ingest.pipeline --full
+```
+
+또는 Streamlit 사이드바의 **📥 메타데이터 새로고침** 버튼 사용.
 
 ---
 
