@@ -1,0 +1,9 @@
+{
+  "id": "krun-rag",
+  "name": "KRUN RAG",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Ask the KRUN RAG chatbot about your vault. Streams answers with clickable citations.",
+  "author": "Antonio",
+  "isDesktopOnly": true
+}

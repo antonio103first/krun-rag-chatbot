@@ -47,6 +47,7 @@ class Citation:
     company: str | None = None
     person: str | None = None
     date: str | None = None
+    category: str = ""      # high-level event category for grouped output
     snippet: str = ""       # truncated, for UI display
     text_full: str = ""     # full chunk text, for LLM context
 
@@ -77,6 +78,56 @@ def build_obsidian_uri(vault_relative: str, vault_name: str | None = None) -> st
     )
 
 
+# Filename suffix → category. Order matters (first match wins).
+_FILENAME_CATEGORY_RULES: list[tuple[str, str]] = [
+    ("_티타임", "식사·친교"),
+    ("_석식모임", "식사·친교"),
+    ("_석식", "식사·친교"),
+    ("_조식", "식사·친교"),
+    ("_중식", "식사·친교"),
+    ("_저녁", "식사·친교"),
+    ("_점심", "식사·친교"),
+    ("_식사", "식사·친교"),
+    ("_와인", "식사·친교"),
+    ("_커피", "식사·친교"),
+    ("_통화", "통화"),
+]
+
+
+def classify_category(file_path: str, doc_type: str | None = None) -> str:
+    """Map a vault file path to a high-level category for grouped output.
+
+    Path-prefix heuristics first (most specific), then filename suffix, then
+    doc_type fallback. Returns one of:
+      골프 / 식사·친교 / 통화 / 사내회의 / 행사 / 회사미팅 / 인물미팅 / 기타
+    """
+    # Normalize: strip any leading slash so substring checks match both
+    # `04_Meetings/...` (vault-relative) and `/04_Meetings/...` shapes.
+    path = (file_path or "").replace("\\", "/").lstrip("/")
+    fname = path.rsplit("/", 1)[-1].removesuffix(".md")
+
+    if path.startswith("06_Resources/골프/") or fname.startswith("골프_"):
+        return "골프"
+    if path.startswith("06_Resources/식당/"):
+        return "식사·친교"
+    if path.startswith("04_Meetings/사내회의/"):
+        return "사내회의"
+    if path.startswith("04_Meetings/행사/"):
+        return "행사"
+
+    for suffix, cat in _FILENAME_CATEGORY_RULES:
+        if suffix in fname:
+            return cat
+
+    if path.startswith("03_Companies/"):
+        return "회사미팅"
+    if path.startswith("02_Persons/"):
+        return "인물미팅"
+    if doc_type == "meeting":
+        return "회사미팅"
+    return "기타"
+
+
 def build_citations(rows: list[dict], vault_name: str | None = None) -> list[Citation]:
     """Turn LanceDB result rows into ordered Citation objects.
 
@@ -100,6 +151,7 @@ def build_citations(rows: list[dict], vault_name: str | None = None) -> list[Cit
         snippet = text_full.replace("\n", " ")
         if len(snippet) > 240:
             snippet = snippet[:240] + "…"
+        doc_type_str = _clean_str(r.get("doc_type")) or "other"
         out.append(
             Citation(
                 n=n,
@@ -108,10 +160,11 @@ def build_citations(rows: list[dict], vault_name: str | None = None) -> list[Cit
                 vault_relative=rel,
                 header_path=_clean_str(r.get("header_path")) or "",
                 obsidian_uri=build_obsidian_uri(rel, vault_name=name),
-                doc_type=_clean_str(r.get("doc_type")) or "other",
+                doc_type=doc_type_str,
                 company=_clean_str(r.get("company")),
                 person=_clean_str(r.get("person")),
                 date=date_str,
+                category=classify_category(rel, doc_type_str),
                 snippet=snippet,
                 text_full=text_full,
             )

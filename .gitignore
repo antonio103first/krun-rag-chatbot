@@ -70,3 +70,7 @@ obsidian-plugin/dist/
 
 # --- OS ---
 desktop.ini
+
+# --- Ad-hoc smoke-test scratch files at project root ---
+/_ask*.json
+/_ask*.out

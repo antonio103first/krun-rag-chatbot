@@ -4,23 +4,26 @@
 
 ---
 
-## 🟢 Current Status (last updated: 2026-05-02)
+## 🟢 Current Status (last updated: 2026-05-02 — end of Phase 2 session)
 
 | Phase | Status | Notes |
 |---|---|---|
 | Phase 0 — Bootstrap | ✅ DONE | uv-based env, BGE-M3 verified, ZDR toggle in `.env` |
-| Phase 1A — Ingest core | ✅ DONE | 4,323+ chunks indexed; 67 files updated via `--incremental` mid-session |
-| Phase 1B — Hybrid retrieval + Sonnet 4.6 | ✅ DONE | RRF fusion, prompt caching working (`cache_read > 0` verified across requests) |
-| Phase 1C — Streamlit MVP | ✅ DONE | Sidebar filters, citations, watcher/refresh buttons, reranker toggle |
-| Phase 1D-A — Reranker | ✅ DONE | bge-reranker-v2-m3 via `uv sync --extra phase1d`; toggle wired in Streamlit |
+| Phase 1A — Ingest core | ✅ DONE | 4,487 chunks indexed |
+| Phase 1B — Hybrid retrieval + Sonnet 4.6 | ✅ DONE | RRF fusion, prompt caching working |
+| Phase 1C — Streamlit MVP | ✅ DONE | Sidebar filters, citations, watcher/refresh, reranker toggle |
+| Phase 1D-A — Reranker | ✅ DONE | bge-reranker-v2-m3 via `uv sync --extra phase1d` |
 | Phase 1D-B — Live watcher | ✅ DONE | `uv run python -m rag.watcher` |
 | Phase 1D-C — PDF attachments | ✅ DONE (code) | User has not yet run `attachment_loader --full` |
-| Phase 1D-D — Incremental ingest | ✅ DONE | mtime-based diff; ran successfully (50 new + 23 changed + 30 deleted) |
+| Phase 1D-D — Incremental ingest | ✅ DONE | mtime-based diff |
 | Phase 1D-E — Eval harness | ✅ DONE (code) | User must populate `rag/eval/eval_set.yaml` (gitignored) |
 | Phase 1D Gate (Recall@8 ≥ 0.7) | ⏳ PENDING | Blocked on eval_set.yaml population |
-| Phase 2 — Obsidian plugin | ⏳ NOT STARTED | TypeScript + FastAPI; only after Phase 1D Gate |
+| Phase 2 — FastAPI server | ✅ DONE | `apps/fastapi_server.py` on 127.0.0.1:8765; SSE `/ask`, `/ask/json`, `/health`, `/reindex` |
+| Phase 2 — Obsidian plugin | ✅ DONE (v0.1.0) | `obsidian-plugin/`; built `main.js` deployed to vault `.obsidian/plugins/krun-rag/`. Plugin auto-enabled in `community-plugins.json`. |
+| **Enumerate mode** | ✅ DONE | Analyzer detects `intent=enumerate` for "list/all/count" queries with date range; server bypasses BM25/vector and runs metadata-only WHERE search (chunk_idx=0 dedupe). Returns up to 50 unique files. |
+| **Category classification** | ✅ DONE | Citations get `category` field via path/filename heuristics: 회사미팅 / 인물미팅 / 사내회의 / 행사 / 통화 / 식사·친교 / 골프 / 기타. Enumerate prompt groups output by category with emoji headers. |
 
-**LanceDB state at session end:** 4,323+ chunks across many files. BM25 sidecar at `data/lancedb/bm25_index.pkl`. Run `uv run python -m rag.ingest.pipeline --refresh-metadata` if metadata logic changes; `--incremental` for new/changed files; `--full` only when re-embedding from scratch (~25 min CPU).
+**LanceDB state at session end:** 4,487 chunks. BM25 sidecar at `data/lancedb/bm25_index.pkl`. Run `uv run python -m rag.ingest.pipeline --refresh-metadata` if metadata logic changes; `--incremental` for new/changed files; `--full` only when re-embedding from scratch (~25 min CPU).
 
 **Working directory on Antonio's machine:** `C:\Users\anton\Documents\Claude AI_Personal\krun-rag-chatbot` (Windows native — no WSL).
 
@@ -57,7 +60,64 @@ When the user starts a new session, do this in order:
 
 ---
 
-## 🐛 Recent Fixes & Decisions (this session)
+## 🆕 What changed in the Phase 2 session (2026-05-02)
+
+**Goal**: ship FastAPI server + Obsidian plugin, then field-test against the user's vault.
+
+### Built
+1. **FastAPI server** (`apps/fastapi_server.py`)
+   - `127.0.0.1:8765`. Endpoints: `GET /health`, `POST /ask` (SSE: `analysis`/`citations`/`delta`*N/`done`/`error`), `POST /ask/json`, `POST /reindex` (background thread; resets store/bm25 singletons after).
+   - CORS for `app://obsidian.md` + localhost.
+   - Launch: `scripts/run_api.bat` or `uv run uvicorn apps.fastapi_server:app --host 127.0.0.1 --port 8765`.
+   - Deps: `uv sync --extra phase1d --extra api` (api extra adds fastapi/uvicorn/sse-starlette).
+
+2. **Obsidian plugin** (`obsidian-plugin/`, TS+esbuild)
+   - Right-leaf `ItemView` (`KrunRagView`): conversation log, streaming markdown, clickable `[n]` tokens, citation cards, health pill (rows count), Health/Reindex/Clear buttons. `Ctrl/⌘+Enter` to submit.
+   - Commands: `Open KRUN RAG sidebar`, `Ask about current note` (prefills `[[stem]]에 대해 알려줘 …`), `Ask KRUN RAG…`, `Reindex vault (incremental)`.
+   - SSE via `fetch().body.getReader()` (not EventSource — POST body required). `AbortController` for cancellation.
+   - Settings: server URL, top-K, max chunks/file, reranker toggle, no-analyze toggle, send-active-note toggle (defaults OFF — search whole vault).
+   - Build: `cd obsidian-plugin && npm install && npm run build`. Deploy: copy `main.js manifest.json styles.css` → `Obsidian_KRUN_Antonio/.obsidian/plugins/krun-rag/`.
+   - Plugin auto-enabled by adding `"krun-rag"` to `Obsidian_KRUN_Antonio/.obsidian/community-plugins.json`. Sidebar leaf auto-mounted by editing `workspace.json` (`type: "krun-rag-view"`, currentTab set to it, right.collapsed=false, width=380).
+
+3. **Enumerate mode** (the big late-session feature)
+   - **Why**: user asked "4월에 미팅한 회사 모두" — RAG returned only 3 (top-K=8 with diversification). Truth: 47 meeting files. Semantic ranking is the wrong tool for "list everything matching".
+   - `query_analyzer.py`: added `intent: "lookup" | "enumerate"` field. Updated SYSTEM_PROMPT with Korean examples ("4월 미팅 모두", "지난주 만난 회사", "올해 IR 받은 회사 몇 개" → enumerate).
+   - `hybrid_search.py`: when `intent=enumerate AND where clause present`, bypass BM25/vector entirely. New `enumerate_search()` does pure metadata WHERE (with `chunk_idx = 0` to keep one head chunk per file), dedupe by file_path, cap at 50.
+   - In enumerate mode, `doc_type` IS included in WHERE (unlike default hybrid path) so "4월 미팅" cleanly excludes daily/dashboard noise.
+   - `prompts.py:build_user_message(mode="enumerate")`: swaps instruction to ask Claude for grouped output by `category=...` field, ordered 회사미팅 → 인물미팅 → 사내회의 → 행사 → 통화 → 식사·친교 → 골프 → 기타, with subtotal at bottom.
+
+4. **Category classification** (`rag/retrieval/citations.py:classify_category`)
+   - Path-prefix heuristics (most specific) → filename suffix → doc_type fallback.
+   - Categories: 골프 / 식사·친교 / 통화 / 사내회의 / 행사 / 회사미팅 / 인물미팅 / 기타.
+   - Filename suffix table: `_티타임 _석식 _조식 _중식 _저녁 _점심 _식사 _와인 _커피 _석식모임` → 식사·친교; `_통화` → 통화.
+   - Path rules: `06_Resources/골프/` → 골프; `04_Meetings/사내회의/` → 사내회의; `04_Meetings/행사/` → 행사; `03_Companies/` default → 회사미팅; `02_Persons/` default → 인물미팅.
+   - Field added to `Citation` dataclass and to `CitationOut` SSE payload (plugin can show category badge — not yet rendered in UI but field is on the wire).
+
+### Bugs fixed (in order encountered)
+1. **Wrong: `run_pipeline()` import in fastapi_server.py** — there's no such function. Use `index_full_vault / index_incremental / refresh_metadata` from `rag.ingest.pipeline`. Fixed.
+2. **Active-note hint biased every query toward the open file** — sidebar settings now default `sendActiveNote: false`. Toggle exists for users who want the hint.
+3. **Enumerate returned only 36/47 April meetings** — `enumerate_search` was pulling `limit*8 = 400` chunks from the table, but April meeting cluster has 719 chunks (avg 15 chunks/file). Random subset missed 11 files. Fix: query with `WHERE ... AND chunk_idx = 0` (1 row per file), `limit*4 = 200` is plenty. Verified all 47/47 unique files now returned.
+4. **Category classification mis-bucketed everything as 회사미팅** — path checks used leading `/` (`/04_Meetings/사내회의/`) but vault_relative paths don't start with `/`. Fix: `lstrip("/")` + `path.startswith(...)` instead of `in`.
+
+### Decisions made
+| Decision | Rationale |
+|---|---|
+| Enumerate mode triggers on `intent=enumerate` AND any structured filter | Without a filter (date/company/person), enumerate would dump 50 random files. Filter is required. |
+| `chunk_idx=0` for enumerate retrieval | Head chunk of meeting note has breadcrumb + key summary. One row per file is enough for a list answer. |
+| Default `sendActiveNote: false` | User wants whole-vault search by default. Active-note hint biased retrieval and was confusing. |
+| Plugin enabled via direct `community-plugins.json` edit | Faster than asking the user to toggle it in the GUI. Sidebar leaf in `workspace.json` similarly auto-mounted. |
+| Category classification at citation-build time, not at ingest | Cheap, deterministic, works on existing index. No reindex needed if rules change. |
+| Group by category inside the LLM, not in code | Claude already merges duplicates (e.g. VC협회 표지 + dated note for the same event) intelligently. Letting code group would lose that. |
+
+### Known data quality issues (Claude flagged in answers — worth fixing in vault)
+- `시너지_20260429_1차DD.md` frontmatter `company: [[meeting]]` — wrong, should be `[[시너지]]`.
+- `투자팀회의_20260420.md` frontmatter `date: 2026-04-19` — filename says 0420.
+- VC협회 조찬세미나, 스케일업 팁스 장관간담회 each have **two** notes per event (one with date suffix, one without) — frontmatter `date` differs between them. User likely wants to dedupe.
+- 4월 47개 파일 중 골프 3건·티타임 1건·석식 1건은 비즈니스 미팅 아님 → category 분리됨 (의도). 사용자가 "미팅"에서 빼고 싶다면 enumerate 시 `category != 골프 AND category != 식사·친교` 옵션 추가 가능.
+
+---
+
+## 🐛 Recent Fixes & Decisions (Phase 1 session, kept for context)
 
 These were learned the hard way; preserve the rationale.
 
@@ -100,14 +160,33 @@ These were learned the hard way; preserve the rationale.
 
 ## 📋 Open TODOs (in priority order)
 
+### Most likely next steps (resume here)
+- [ ] **Plugin field-test (in progress)** — user is using the Obsidian sidebar in real work. Collect failures: bad citations, wrong category bucket, missing files in enumerate, slow first-query (BGE-M3 model load takes ~10s). When the user reports an issue, FIRST hit `/ask/json` with the same query to inspect raw citations before debugging the LLM output.
+- [ ] **Vault data hygiene (Claude already flags these in answers)** — examples found in this session:
+  - `시너지_20260429_1차DD.md` `company: [[meeting]]` → `[[시너지]]`
+  - `투자팀회의_20260420.md` `date: 2026-04-19` → `2026-04-20`
+  - VC협회 / 스케일업 팁스 노트 중복 (날짜 suffix 있음/없음 두 개)
+  - Consider: `scripts/audit_frontmatter.py` to spot `company`/`person` values that don't unwrap cleanly, dates that disagree with filename pattern.
+- [ ] **More enumerate-mode validation** — try variations and watch for misses:
+  - "지난주 만난 사람들" (인물 + 짧은 date range)
+  - "올해 IR 받은 회사" (date range + tag-ish: IR)
+  - "3월 미팅 모두" (different month)
+  - "이번 주 일정" (future dates — current data may not have any)
+  - Edge case: enumerate with no filter → currently falls through to hybrid; verify behavior is reasonable.
+
 ### Blocking Phase 1D Gate
 - [ ] **User: populate `rag/eval/eval_set.yaml`** with 30 real questions (5 per category). Template + schema in `rag/eval/eval_set.example.yaml`. The file is gitignored.
 - [ ] **Run eval & measure Phase 1D Gate**: `uv run python -m rag.eval.run_eval --output rag/eval/results/baseline.json`. Then `--reranker-on` for comparison. Target: `file_match_rate ≥ 0.7`.
 
-### Pending user actions (carried over from prior session)
-- [ ] **Verify diversification fix in browser** — 4 test queries documented in last assistant message of prior session. Specifically the 정경원 사장 query should now surface meeting note `정경원 사장_20260421_보백결재조건 변경 검토.md` alongside the profile.
+### Pending user actions (carried over from earlier sessions)
 - [ ] **Run PDF ingest once** (4 PDFs only, fast): `uv run python -m rag.ingest.attachment_loader --full`.
-- [ ] **Phase 1C 1-week real usage evaluation** (originally requested by user). Track 6 categories of feedback: 🟢 잘 작동, 🟡 답변 부족, 🔴 검색 실패, 🟣 분석기 오류, ⚙️ UI 불편, 💰 비용.
+- [ ] **Phase 1C 1-week real usage evaluation** — now subsumed by the plugin field-test above.
+
+### Plugin polish (low priority, only if user asks)
+- [ ] Render `category` badge on each citation card in the sidebar (field already arrives in SSE payload). Add `.krun-rag-citation-cat` style.
+- [ ] Citation card sort by date ascending in the sidebar (currently follows server order, which is also date-asc for enumerate).
+- [ ] Settings toggle: include/exclude `골프 / 식사·친교` from enumerate result. Server-side WHERE clause: `category` is computed at citation-build time, not stored, so this'd need to push the filter into the frontend (filter citations after receipt) or precompute at ingest.
+- [ ] Plugin "Reload server" button when health is offline (currently must restart `run_api.bat`).
 
 ### Code-side polish (small, low priority)
 - [ ] If watcher dies on Windows reserved filenames or transient locks, surface to user (currently logs and continues).
@@ -115,13 +194,46 @@ These were learned the hard way; preserve the rationale.
 - [ ] Eval harness's faithfulness scoring is currently `must_contain` substring matching. Replace with claim-by-claim LLM judge if Phase 1D Gate is hard to meet with current proxy.
 - [ ] `attachment_loader._find_parent_note` is best-effort; if a single PDF is embedded in multiple notes, parent_path links to one of them. Acceptable for now.
 
-### Phase 2 (Obsidian plugin — not started)
-Per original spec:
-- `apps/fastapi_server.py` — wraps RAG core, SSE streaming, `localhost:8765`.
-- TypeScript plugin: ItemView sidebar + command palette items.
-- "Ask about current note" command (auto-feeds active file as context).
-- Citation clicks → `app.workspace.openLinkText()`.
-- Package into `Obsidian_KRUN_Antonio/.obsidian/plugins/krun-rag/`.
+### Phase 2 (Obsidian plugin — DONE 2026-05-02)
+
+**Server** (`apps/fastapi_server.py`):
+- `GET  /health` — rows count + vault/model info + reindex status
+- `POST /ask` — SSE stream: events `analysis` → `citations` → `delta`*N → `done` | `error`
+- `POST /ask/json` — non-streaming JSON (analysis + citations + answer + usage)
+- `POST /reindex` — body `{mode: "incremental"|"full"|"refresh-metadata"}`; runs in a daemon thread; resets BM25/store singletons after.
+- Singletons: store/bm25/Claude client are lazy + reset on reindex finish.
+- CORS: `app://obsidian.md` + localhost.
+- Launch: `scripts/run_api.bat` or `uv run uvicorn apps.fastapi_server:app --host 127.0.0.1 --port 8765`.
+- Install deps: `uv sync --extra phase1d --extra api` (api extra adds fastapi/uvicorn/sse-starlette).
+
+**Plugin** (`obsidian-plugin/`):
+- TypeScript + esbuild, vanilla `fetch()` SSE reader (no EventSource — POST body needed).
+- `src/main.ts` — plugin entry, ribbon icon, 4 commands:
+  - `Open KRUN RAG sidebar`
+  - `Ask about current note` — checkCallback gated on active file; prefills `[[stem]]에 대해 알려줘 …`
+  - `Ask KRUN RAG…` — opens sidebar, focuses input
+  - `Reindex vault (incremental)`
+- `src/view.ts` — `KrunRagView` (right-leaf ItemView): conversation log, streaming markdown render, clickable `[n]` tokens, citation cards, header with health pill (rows count), Reindex/Health/Clear buttons. `Ctrl/⌘+Enter` to submit.
+- `src/api.ts` — `KrunRagApi`: `health()`, `ask()` returns `AbortController`, `reindex()`.
+- `src/settings.ts` — server URL, top-K, max chunks/file, reranker toggle, no-analyze toggle, send-active-note toggle.
+- Citation click → `app.vault.getAbstractFileByPath(vault_relative)` → `getLeaf(false).openFile()`; falls back to `workspace.openLinkText()`.
+- Active note hint: when enabled, plugin sends `active_note` in body; server prepends `[현재 노트: stem]` to the query for retrieval (analyzer/Claude still see the original question).
+
+**Build & deploy**:
+```bash
+cd obsidian-plugin
+npm install
+npm run build
+# Deploy
+cp main.js manifest.json styles.css \
+   /c/Users/anton/Documents/Obsidian_KRUN_Antonio/.obsidian/plugins/krun-rag/
+```
+
+**To use**:
+1. Start API server: `scripts/run_api.bat` (or run on boot via Task Scheduler if desired).
+2. In Obsidian: Settings → Community plugins → Enable "KRUN RAG".
+3. Click ribbon icon (messages-square) or run command `Open KRUN RAG sidebar`.
+4. Health pill should turn green and show chunk count.
 
 ---
 

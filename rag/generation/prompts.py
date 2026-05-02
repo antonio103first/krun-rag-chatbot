@@ -104,6 +104,8 @@ def format_context_block(citations: list[Citation]) -> str:
         head_meta_bits: list[str] = []
         if c.doc_type:
             head_meta_bits.append(f"type={c.doc_type}")
+        if getattr(c, "category", ""):
+            head_meta_bits.append(f"category={c.category}")
         if c.company:
             head_meta_bits.append(f"company={c.company}")
         if c.person:
@@ -131,17 +133,42 @@ def _strip_breadcrumb(text: str) -> str:
     return text
 
 
-def build_user_message(query: str, citations: list[Citation]) -> str:
-    """Compose the user-facing message: context block + question."""
+def build_user_message(query: str, citations: list[Citation], mode: str = "lookup") -> str:
+    """Compose the user-facing message: context block + question.
+
+    `mode="enumerate"` swaps the instruction to emphasize completeness over
+    depth — used when retrieval bypassed semantic ranking and supplied every
+    matching file in the date/filter window.
+    """
     if not citations:
         ctx = "(컨텍스트 없음)"
     else:
         ctx = format_context_block(citations)
+
+    if mode == "enumerate":
+        instruction = (
+            "위 컨텍스트는 질문의 필터(날짜/회사/인물)에 매칭되는 **모든 노트**의 대표 청크입니다. "
+            "검색 순위가 아니라 메타데이터 매칭 결과이므로 누락된 항목이 없습니다.\n"
+            "1) 컨텍스트의 각 청크 헤더에 있는 `category=...` 값으로 **그룹**을 만들어 출력하세요. "
+            "그룹 헤더 형식: `## 🏢 회사미팅 (N건)` / `## 🤝 인물미팅` / `## 🏛 사내회의` / "
+            "`## 🎪 행사` / `## ☎️ 통화` / `## 🍽 식사·친교` / `## ⛳ 골프` / `## 📁 기타`. "
+            "사용된 카테고리만 출력하고, 사용 빈도가 높은 순서가 아니라 다음 순서로: "
+            "회사미팅 → 인물미팅 → 사내회의 → 행사 → 통화 → 식사·친교 → 골프 → 기타.\n"
+            "2) 각 그룹 안에서 시간순(오름차순)으로 정렬, 항목당 한 줄: "
+            "`- YYYY-MM-DD | 회사 또는 인물 | 한 줄 요약 [n]`.\n"
+            "3) 답변 끝에 총 개수와 그룹별 소계를 정리: `**총 N건** (회사미팅 a · 인물미팅 b · 행사 c · …)`.\n"
+            "4) **모든 항목을 빠짐없이** 포함하고, 인용 [n] 없이 적지 마세요. 컨텍스트 외 정보 추가 금지."
+        )
+    else:
+        instruction = (
+            "위 컨텍스트만 사용해서 한국어로 답변하세요. 모든 사실에 [n] 인용을 붙입니다."
+        )
+
     return (
         "[컨텍스트]\n"
         f"{ctx}\n\n"
         "[질문]\n"
         f"{query}\n\n"
         "[지시]\n"
-        "위 컨텍스트만 사용해서 한국어로 답변하세요. 모든 사실에 [n] 인용을 붙입니다."
+        f"{instruction}"
     )

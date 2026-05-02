@@ -36,6 +36,63 @@ class HybridSearchResult:
     rerank_pool_size: int = 0
     diversified: bool = False
     distinct_files: int = 0
+    mode: str = "hybrid"  # "hybrid" | "enumerate"
+
+
+# --- Enumerate mode: pure metadata WHERE, one chunk per file --------------
+ENUMERATE_LIMIT = 50
+
+
+def enumerate_search(
+    *,
+    where: str,
+    store: VaultChunkStore,
+    limit: int = ENUMERATE_LIMIT,
+) -> list[dict]:
+    """Metadata-only listing: return one representative chunk per file.
+
+    For 'list all April meetings' style queries — bypasses BM25/vector ranking
+    so that the answer reflects the full set of matching files, not the top-K
+    semantically-ranked chunks.
+
+    Implementation: first pass narrows to the head chunk per file
+    (`chunk_idx = 0`) since one row per file is plenty for an enumeration
+    answer and that's where the breadcrumb + most useful summary lives.
+    Falls back to a wide-pool dedupe if the head-chunk constraint returns
+    nothing (e.g., for date ranges where files happen to have all chunks
+    at idx > 0 — shouldn't happen with our chunker, but safe).
+    """
+    head_where = f"({where}) AND chunk_idx = 0"
+    rows = store.search_by_filter(head_where, limit=limit * 4)
+    if rows:
+        rows.sort(key=lambda r: (r.get("date") or "", r.get("file_path") or ""))
+        # Dedupe defensively in case a file has multiple chunk_idx=0 rows.
+        seen: set[str] = set()
+        out: list[dict] = []
+        for r in rows:
+            fp = r.get("file_path") or ""
+            if fp in seen:
+                continue
+            seen.add(fp)
+            out.append(r)
+            if len(out) >= limit:
+                break
+        return out
+
+    # Fallback: pull a very wide pool and dedupe manually.
+    rows = store.search_by_filter(where, limit=10000)
+    rows.sort(key=lambda r: (r.get("date") or "", r.get("file_path") or "", r.get("chunk_idx") or 0))
+    seen2: set[str] = set()
+    out2: list[dict] = []
+    for r in rows:
+        fp = r.get("file_path") or ""
+        if fp in seen2:
+            continue
+        seen2.add(fp)
+        out2.append(r)
+        if len(out2) >= limit:
+            break
+    return out2
 
 
 def _diversify_by_file(rows: list[dict], max_per_file: int, top_k: int) -> list[dict]:
@@ -138,6 +195,34 @@ def hybrid_search(
 
     rewritten = analysis.rewritten_query if analysis else query
     where = where_override if where_override is not None else build_where_clause(analysis)
+
+    # Enumerate mode: when the analyzer flags an enumeration intent and we
+    # have at least one structured filter (date / company / person), bypass
+    # BM25/vector ranking and pull all matching files (deduped) up to a cap.
+    # This is the right answer to "list all April meetings" — semantic top-K
+    # would only surface a few of the 47 matching files.
+    if (
+        analysis is not None
+        and getattr(analysis, "intent", "lookup") == "enumerate"
+        and where
+    ):
+        # In enumerate mode we DO honor doc_type from the analyzer (unlike the
+        # default hybrid path), because narrowing to e.g. only meeting notes is
+        # exactly what gives a clean enumerable list.
+        enum_where = where
+        if analysis.doc_types:
+            joined = ", ".join(f"'{_q(t)}'" for t in analysis.doc_types)
+            enum_where = f"({where}) AND doc_type IN ({joined})"
+        rows = enumerate_search(where=enum_where, store=store, limit=ENUMERATE_LIMIT)
+        return HybridSearchResult(
+            rows=rows,
+            where_clause=enum_where,
+            bm25_hit_count=0,
+            vector_hit_count=0,
+            fused_count=len(rows),
+            distinct_files=len({r.get("file_path") or "" for r in rows}),
+            mode="enumerate",
+        )
 
     # 1. BM25
     bm25_hits = bm25.search(rewritten, top_k=cfg.bm25_top_k)

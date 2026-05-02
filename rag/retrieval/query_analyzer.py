@@ -37,6 +37,7 @@ SYSTEM_PROMPT = """You analyze short Korean queries for a VC's internal Obsidian
 
 Output ONLY a single JSON object on one line, no prose, no code fences. Keys (use null/empty list when not implied):
   - "rewritten_query": cleaned Korean query for embedding (remove date words, leave subject + intent)
+  - "intent":     "lookup" (default) | "enumerate" — use "enumerate" when the user wants a complete list/count of matching docs (e.g., "4월 미팅 모두", "지난주 만난 회사", "올해 IR 받은 회사 몇 개") rather than a focused answer.
   - "companies":  list of company names mentioned (Korean or English, no [[brackets]])
   - "persons":    list of person names mentioned
   - "doc_types":  subset of [company, person, meeting, daily, periodic, project, resource, inbox, dashboard]
@@ -44,7 +45,8 @@ Output ONLY a single JSON object on one line, no prose, no code fences. Keys (us
   - "date_range": {"from": "YYYY-MM-DD"|null, "to": "YYYY-MM-DD"|null} resolved against `today`
 
 Rules:
-- "지난 분기" / "최근 3개월" / "작년" must be resolved into concrete YYYY-MM-DD bounds using `today`.
+- "지난 분기" / "최근 3개월" / "작년" / "4월" must be resolved into concrete YYYY-MM-DD bounds using `today`.
+- intent="enumerate" when the user asks "몇 개", "모두", "전체", "어떤 회사들", "리스트", "목록", "만난 회사", "만난 사람" with a time qualifier — i.e., questions that expect a complete enumeration rather than analysis.
 - If the query mentions "1차DD" or "2차DD" or "투심위" or "킥오프" or "주간회의", add "meeting" to doc_types.
 - If the query is about a company without time qualifiers, add both "company" and "meeting" to doc_types.
 - If the query mentions an LP / 투자자 / 운용사 / 사장 / 대표 / 부사장, add "person" and "meeting".
@@ -52,13 +54,16 @@ Rules:
 
 Examples (today=2026-04-29):
 Q: 위밋모빌리티 1차DD 핵심 리스크
-A: {"rewritten_query":"위밋모빌리티 1차DD 핵심 리스크","companies":["위밋모빌리티"],"persons":[],"doc_types":["meeting","company"],"tags":[],"date_range":{"from":null,"to":null}}
+A: {"rewritten_query":"위밋모빌리티 1차DD 핵심 리스크","intent":"lookup","companies":["위밋모빌리티"],"persons":[],"doc_types":["meeting","company"],"tags":[],"date_range":{"from":null,"to":null}}
 
 Q: 지난 분기 만난 LP 정리
-A: {"rewritten_query":"LP 미팅 정리","companies":[],"persons":[],"doc_types":["meeting","person"],"tags":["LP"],"date_range":{"from":"2026-01-01","to":"2026-03-31"}}
+A: {"rewritten_query":"LP 미팅","intent":"enumerate","companies":[],"persons":[],"doc_types":["meeting","person"],"tags":["LP"],"date_range":{"from":"2026-01-01","to":"2026-03-31"}}
+
+Q: 4월에 미팅한 회사 모두 알려줘
+A: {"rewritten_query":"미팅한 회사","intent":"enumerate","companies":[],"persons":[],"doc_types":["meeting"],"tags":[],"date_range":{"from":"2026-04-01","to":"2026-04-30"}}
 
 Q: 강규식 상무와의 최근 미팅 액션아이템
-A: {"rewritten_query":"강규식 상무 미팅 액션아이템","companies":[],"persons":["강규식 상무"],"doc_types":["meeting"],"tags":[],"date_range":{"from":null,"to":null}}
+A: {"rewritten_query":"강규식 상무 미팅 액션아이템","intent":"lookup","companies":[],"persons":["강규식 상무"],"doc_types":["meeting"],"tags":[],"date_range":{"from":null,"to":null}}
 """
 
 
@@ -66,6 +71,7 @@ A: {"rewritten_query":"강규식 상무 미팅 액션아이템","companies":[],"
 class QueryAnalysis:
     raw: str
     rewritten_query: str
+    intent: str = "lookup"  # "lookup" | "enumerate"
     companies: list[str] = field(default_factory=list)
     persons: list[str] = field(default_factory=list)
     doc_types: list[str] = field(default_factory=list)
@@ -163,9 +169,12 @@ def analyze_query(
 
     rewritten = (data.get("rewritten_query") or query).strip() or query
     date_range = data.get("date_range") or {}
+    intent_raw = (data.get("intent") or "lookup").strip().lower()
+    intent = "enumerate" if intent_raw == "enumerate" else "lookup"
     return QueryAnalysis(
         raw=query,
         rewritten_query=rewritten,
+        intent=intent,
         companies=[c for c in (data.get("companies") or []) if isinstance(c, str)],
         persons=[p for p in (data.get("persons") or []) if isinstance(p, str)],
         doc_types=_validate_doc_types(data.get("doc_types") or []),
