@@ -207,15 +207,21 @@ def hybrid_search(
     if (
         analysis is not None
         and getattr(analysis, "intent", "lookup") == "enumerate"
-        and where
+        and (where or analysis.doc_types)
     ):
         # In enumerate mode we DO honor doc_type from the analyzer (unlike the
         # default hybrid path), because narrowing to e.g. only meeting notes is
-        # exactly what gives a clean enumerable list.
-        enum_where = where
-        if analysis.doc_types:
+        # exactly what gives a clean enumerable list. When there's no other
+        # WHERE filter (e.g. "Antonio가 투자한 업체들 모두" → just doc_types=
+        # ["company"]), the doc_type clause alone carries the enumeration.
+        if where and analysis.doc_types:
             joined = ", ".join(f"'{_q(t)}'" for t in analysis.doc_types)
             enum_where = f"({where}) AND doc_type IN ({joined})"
+        elif where:
+            enum_where = where
+        else:  # doc_types only
+            joined = ", ".join(f"'{_q(t)}'" for t in analysis.doc_types)
+            enum_where = f"doc_type IN ({joined})"
         rows = enumerate_search(where=enum_where, store=store, limit=ENUMERATE_LIMIT)
         return HybridSearchResult(
             rows=rows,
