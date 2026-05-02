@@ -171,8 +171,10 @@ These were learned the hard way; preserve the rationale.
   - Edge case: enumerate with no filter → currently falls through to hybrid; verify behavior is reasonable.
 
 ### Blocking Phase 1D Gate
-- [ ] **User: populate `rag/eval/eval_set.yaml`** with 30 real questions (5 per category). Template + schema in `rag/eval/eval_set.example.yaml`. The file is gitignored.
-- [ ] **Run eval & measure Phase 1D Gate**: `uv run python -m rag.eval.run_eval --output rag/eval/results/baseline.json`. Then `--reranker-on` for comparison. Target: `file_match_rate ≥ 0.7`.
+- [x] **Starter `eval_set.yaml` drafted** (2026-05-02, 15 items, 13 evaluated, 2 skipped placeholders) — auto-verifiable `expected_files` only, no `must_contain` (those need user judgment). User should expand to 30 items + add `must_contain` for known facts.
+- [x] **Baseline measured**: `file_match_rate = 0.615` (gate ≥ 0.7 not met). Reranker had no effect (same 0.615) — misses are retrieval-side, not ranking-side. Saved to `rag/eval/results/baseline.json`.
+- [ ] **Retrieval bug to investigate**: when query analyzer sets a single-company `WHERE` filter, RRF surfaces 8 chunks all from the company **profile** note (e.g. `메타씨앤아이.md`) and zero from dated meeting notes (e.g. `메타씨앤아이_20260317_1차DD.md`). The diversification cap (`max_chunks_per_file=2`) doesn't help because its backfill path pulls more chunks from the same file when no other file is in the candidate pool. Profile note wins because it contains all the deal_pipeline auto-summary fields that match general terms ("회사", "투자", company name); meeting notes contain technical specifics that don't BM25-hit on "리스크/핵심" etc. Possible fixes: (a) when company filter is active, force-include head chunk of each meeting under that company; (b) tweak RRF or BM25 weighting against the profile pattern; (c) include `chunk_idx=0 of every same-company file` as guaranteed candidates before diversification. Needs design before patching.
+- [ ] **Vault hygiene one-off**: `Blueward_20260419_1차DD.md` content does NOT appear to be about Blueward — it's about an SAP/STO consulting firm (참석자 "최원영전무, 정래진 본부장", content "아이에스티엔/INF컨설팅"). Either the file is mis-named or the wrong meeting got pasted in. User should review.
 
 ### Pending user actions (carried over from earlier sessions)
 - [ ] **Run PDF ingest once** (4 PDFs only, fast): `uv run python -m rag.ingest.attachment_loader --full`.
