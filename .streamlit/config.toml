@@ -1,0 +1,22 @@
+# KRUN RAG — Streamlit configuration.
+#
+# Why fileWatcherType=none:
+# FlagEmbedding pulls in transformers, which lazily registers ~200 image
+# processors that import torchvision at attribute-access time. Streamlit's
+# default file watcher (`auto`) recursively touches every loaded module to
+# set up source-change reload, which triggers each one of those imports and
+# floods the console with `ModuleNotFoundError: No module named 'torchvision'`.
+# Disabling the watcher silences the noise; the trade-off is that source
+# edits to the Python files no longer auto-reload (restart the server to
+# pick them up).
+
+[server]
+fileWatcherType = "none"
+headless = true
+runOnSave = false
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"

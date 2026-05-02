@@ -1,0 +1,53 @@
+# =============================================================================
+# KRUN RAG — Eval Set TEMPLATE
+#
+# Copy this file to `rag/eval/eval_set.yaml` (gitignored) and fill in real
+# entries from your vault. Each item describes ONE expected query and lets
+# the harness check whether retrieval surfaced the right note(s).
+#
+# Schema per item:
+#   id            : short slug (unique)
+#   category      : 회사 단건 | 시간 기반 | 필터+의미 | 정량/통계 | 작성보조 | 인사이트
+#   query         : the natural-language question
+#   expected_files: list of vault-relative paths (without .md) that SHOULD
+#                   appear in the top-K. Match is by substring on
+#                   `vault_relative` for resilience. Optional.
+#   expected_companies / expected_persons: same idea, but matches against the
+#                                          metadata fields of returned chunks.
+#   must_contain  : list of substrings the LLM answer must include
+#                   (case-insensitive). Use sparingly; over-specific matchers
+#                   are brittle.
+#   must_not_contain: substrings the answer must NOT include (e.g.
+#                     hallucinated company names).
+#   skip          : true to leave the entry in the file but skip during eval.
+# =============================================================================
+
+items:
+  - id: blueward_1차dd_risk
+    category: 회사 단건
+    query: "Blueward 1차DD 핵심 리스크 정리"
+    expected_companies: ["Blueward"]
+    expected_files:
+      - "03_Companies/Antonio/검토단계/Blueward/Blueward"
+    must_not_contain: []  # add hallucinated company names you want to flag
+
+  - id: 강규식_meetings
+    category: 회사 단건
+    query: "강규식 상무 미팅 이력"
+    expected_persons: ["강규식 상무"]
+    expected_files:
+      - "02_Persons/강규식 상무/강규식 상무"
+
+  - id: last_week_actions
+    category: 시간 기반
+    query: "지난주 미팅 액션아이템"
+    # Date filter handled by the analyzer; we just check that meetings show up.
+
+  - id: krun_7th_fund
+    category: 필터+의미
+    query: "케이런 7호 펀드 관련 회사"
+    must_contain: []  # populate with real company names from your vault
+
+  # --- Add 25-30 more entries covering all 6 categories. ---------------
+  # Aim for ~5 per category. Real entries below are required for meaningful
+  # Recall@8 numbers.

@@ -1,0 +1,121 @@
+[project]
+name = "krun-rag-chatbot"
+version = "0.1.0"
+description = "KRUN VC internal RAG chatbot for Obsidian vault Q&A"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Antonio" }]
+
+dependencies = [
+    # --- Vector store ---
+    "lancedb>=0.13",
+    "pyarrow>=17.0",
+
+    # --- Embeddings (BGE-M3 local) ---
+    "sentence-transformers>=3.0",
+    "torch>=2.4",
+
+    # --- LLM ---
+    "anthropic>=0.40",
+
+    # --- Retrieval ---
+    "rank-bm25>=0.2.2",
+
+    # --- Markdown / frontmatter ---
+    "python-frontmatter>=1.1",
+    "markdown-it-py>=3.0",
+
+    # --- File watching ---
+    "watchdog>=5.0",
+
+    # --- Config / settings ---
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+
+    # --- UI (Phase 1C) ---
+    "streamlit>=1.40",
+
+    # --- Utilities ---
+    "tqdm>=4.66",
+    "tenacity>=9.0",
+]
+
+[project.optional-dependencies]
+# --- Korean morphological analyzer (Phase 1A experiment) ---
+korean = ["kiwipiepy>=0.18"]
+
+# --- PDF extraction (Phase 1A: PDF attachments) ---
+pdf = [
+    "pymupdf>=1.27",
+    "pytesseract>=0.3.10",
+    "Pillow>=10.0",
+]
+
+# --- DOCX/HWP extraction (Phase 1D) ---
+office = [
+    "python-docx>=1.2",
+    "olefile>=0.47",
+    "lxml>=6.0",
+]
+
+# --- Reranker (Phase 1D) ---
+rerank = ["FlagEmbedding>=1.3"]
+
+# --- API server (Phase 2) ---
+api = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "sse-starlette>=2.1",
+]
+
+# --- Eval (Phase 1D) ---
+eval = ["ragas>=0.2"]
+
+# --- Dev tools ---
+dev = [
+    "ruff>=0.6",
+    "pytest>=8.0",
+    "ipython>=8.0",
+]
+
+# --- Convenience: Phase 1A everything ---
+phase1a = [
+    "kiwipiepy>=0.18",
+    "pymupdf>=1.27",
+    "pytesseract>=0.3.10",
+    "Pillow>=10.0",
+]
+
+# --- Convenience: Phase 1D everything (1A + reranker + eval helpers) ---
+# Use this when you want one command to install all the optional pieces:
+#     uv sync --extra phase1d
+phase1d = [
+    # phase1a base
+    "kiwipiepy>=0.18",
+    "pymupdf>=1.27",
+    "pytesseract>=0.3.10",
+    "Pillow>=10.0",
+    # rerank
+    "FlagEmbedding>=1.3",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["rag"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

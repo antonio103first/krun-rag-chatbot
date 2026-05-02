@@ -1,0 +1,101 @@
+# =============================================================================
+# KRUN RAG Chatbot — Application Configuration
+# Override any field via environment variables (see .env.example).
+# =============================================================================
+
+# --- Vault paths -------------------------------------------------------------
+vault:
+  # Absolute path to the Obsidian vault root (Windows or WSL).
+  path: "C:\\Users\\anton\\Documents\\Obsidian_KRUN_Antonio"
+
+  # Subfolders to index (relative to vault.path). Empty list = whole vault.
+  include_dirs:
+    - "00_Inbox"
+    - "01_Daily"
+    - "01a_Periodic"
+    - "02_Persons"
+    - "03_Companies"
+    - "04_Meetings"
+    - "05_Projects"
+    - "06_Resources"
+
+  # Folders/patterns to ignore.
+  exclude_patterns:
+    - ".obsidian/"
+    - ".makemd/"
+    - ".smart-env/"
+    - ".space/"
+    - ".trash/"
+    - "07_Archive/"        # 사용자 제외 결정
+    - "08_회의록/"          # STT 변환본 (04_Meetings로 정본 관리)
+    - "_attachments/"       # 첨부 별도 처리 (attachment_loader)
+    - "_automation/"
+    - "_backup_*/"          # 백업 폴더 (날짜 변형 대응)
+    - "_Templates/"
+    - "copilot/"
+    - "**/*.canvas"
+    - "**/sortspec.md"      # Obsidian sort-order plugin file
+
+# --- Storage -----------------------------------------------------------------
+storage:
+  lancedb_path: "./data/lancedb"
+  table_name: "vault_chunks"
+
+# --- Embedding model ---------------------------------------------------------
+embedding:
+  model_name: "BAAI/bge-m3"
+  dimension: 1024
+  batch_size: 32
+  device: "auto"          # "cuda" | "cpu" | "auto"
+  max_seq_length: 8192
+
+# --- Chunking ---------------------------------------------------------------
+chunking:
+  strategy: "header_aware"   # "header_aware" | "sliding"
+  max_tokens: 800
+  overlap_tokens: 80
+  min_tokens: 50
+  preserve_breadcrumb: true  # Keep "H1 > H2 > H3" prefix in each chunk
+
+# --- BM25 / Korean tokenization (Phase 1A experiment) -----------------------
+bm25:
+  # "char_trigram" -> simple, no extra deps, ~80% of morphological accuracy
+  # "kiwipiepy"    -> Korean morphological analyzer, ~100MB model
+  # "lancedb_fts"  -> use LanceDB built-in Tantivy full-text search
+  tokenizer: "char_trigram"
+  k1: 1.5
+  b: 0.75
+
+# --- Retrieval ---------------------------------------------------------------
+retrieval:
+  bm25_top_k: 30
+  vector_top_k: 30
+  rrf_k: 60                 # Reciprocal Rank Fusion constant
+  final_top_k: 8            # Chunks sent to the generator
+  max_chunks_per_file: 2    # diversify: cap chunks per file in final top-K (0 = no cap)
+  reranker_enabled: false   # Phase 1D toggle (uv sync --extra rerank to enable)
+  reranker_model: "BAAI/bge-reranker-v2-m3"
+  rerank_pool_size: 30      # candidates passed to the cross-encoder when enabled
+
+# --- Generation --------------------------------------------------------------
+generation:
+  gen_model: "claude-sonnet-4-6"
+  analyzer_model: "claude-haiku-4-5"
+  max_tokens: 2048
+  temperature: 0.2
+  stream: true
+  prompt_caching: true    # cache_control: ephemeral on system prompt
+  zdr_enabled: false      # Toggle once Anthropic enrollment confirmed
+
+# --- Watcher (Phase 1D) -----------------------------------------------------
+watcher:
+  enabled: false
+  debounce_seconds: 2.0
+  ignore_patterns:
+    - ".obsidian/"
+    - "*.tmp"
+
+# --- Logging -----------------------------------------------------------------
+logging:
+  level: "INFO"
+  file: null              # null = stdout only
