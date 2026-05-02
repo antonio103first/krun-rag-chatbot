@@ -232,9 +232,42 @@ export class KrunRagView extends ItemView {
       rawAnswer: "",
       startedAt: Date.now(),
     };
+    // Per-turn toolbar with Copy buttons (rendered after answer is final).
+    const toolbar = wrap.createDiv({ cls: "krun-rag-turn-toolbar" });
+    const copyAnswerBtn = toolbar.createEl("button", { text: "📋 답변" });
+    copyAnswerBtn.title = "답변 본문 복사";
+    copyAnswerBtn.onclick = (e) => {
+      e.stopPropagation();
+      navigator.clipboard.writeText(turn.rawAnswer || "");
+      new Notice("답변 복사됨");
+    };
+    const copyAllBtn = toolbar.createEl("button", { text: "📋 Q+A+출처" });
+    copyAllBtn.title = "질문 + 답변 + 출처 마크다운으로 복사";
+    copyAllBtn.onclick = (e) => {
+      e.stopPropagation();
+      navigator.clipboard.writeText(this.formatTurnMarkdown(turn));
+      new Notice("Q+A+출처 복사됨");
+    };
     // Keep scrolled to bottom
     this.convoEl.scrollTop = this.convoEl.scrollHeight;
     return turn;
+  }
+
+  /** Render Q + A + citations as a portable markdown blob for copy/paste. */
+  private formatTurnMarkdown(turn: Turn): string {
+    const lines: string[] = [];
+    lines.push(`### Q: ${turn.question}`);
+    lines.push("");
+    lines.push(turn.rawAnswer.trim() || "(no answer)");
+    if (turn.citations.length) {
+      lines.push("");
+      lines.push("**Sources:**");
+      for (const c of turn.citations) {
+        const meta = [c.doc_type, c.company, c.person, c.date].filter(Boolean).join(" · ");
+        lines.push(`- [${c.n}] ${c.title}${c.header_path ? " > " + c.header_path : ""}  \n  ${meta} — \`${c.vault_relative}\``);
+      }
+    }
+    return lines.join("\n");
   }
 
   /** Streaming view: plain text + citation markers; no full markdown render until done. */
@@ -304,14 +337,20 @@ export class KrunRagView extends ItemView {
     block.createDiv({ cls: "krun-rag-citations-header", text: `Sources (${turn.citations.length})` });
     for (const c of turn.citations) {
       const row = block.createDiv({ cls: "krun-rag-citation" });
-      row.createDiv({ cls: "krun-rag-citation-title", text: `[${c.n}] ${c.title}${c.header_path ? " > " + c.header_path : ""}` });
+      // Only the title is clickable — meta/snippet are plain selectable text
+      // so the user can drag-select inside the citation card without
+      // accidentally opening the file.
+      const titleEl = row.createDiv({
+        cls: "krun-rag-citation-title",
+        text: `[${c.n}] ${c.title}${c.header_path ? " > " + c.header_path : ""}`,
+      });
+      titleEl.onclick = () => this.openCitationByPath(c.vault_relative);
       const metaBits: string[] = [c.doc_type];
       if (c.company) metaBits.push(c.company);
       if (c.person) metaBits.push(c.person);
       if (c.date) metaBits.push(c.date);
       row.createDiv({ cls: "krun-rag-citation-meta", text: metaBits.join(" · ") + " — " + c.vault_relative });
       if (c.snippet) row.createDiv({ cls: "krun-rag-citation-snippet", text: c.snippet });
-      row.onclick = () => this.openCitationByPath(c.vault_relative);
     }
   }
 
