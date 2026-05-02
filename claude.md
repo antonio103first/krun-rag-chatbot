@@ -170,11 +170,16 @@ These were learned the hard way; preserve the rationale.
   - "이번 주 일정" (future dates — current data may not have any)
   - Edge case: enumerate with no filter → currently falls through to hybrid; verify behavior is reasonable.
 
-### Blocking Phase 1D Gate
-- [x] **Starter `eval_set.yaml` drafted** (2026-05-02, 15 items, 13 evaluated, 2 skipped placeholders) — auto-verifiable `expected_files` only, no `must_contain` (those need user judgment). User should expand to 30 items + add `must_contain` for known facts.
-- [x] **Baseline measured**: `file_match_rate = 0.615` (gate ≥ 0.7 not met). Reranker had no effect (same 0.615) — misses are retrieval-side, not ranking-side. Saved to `rag/eval/results/baseline.json`.
-- [ ] **Retrieval bug to investigate**: when query analyzer sets a single-company `WHERE` filter, RRF surfaces 8 chunks all from the company **profile** note (e.g. `메타씨앤아이.md`) and zero from dated meeting notes (e.g. `메타씨앤아이_20260317_1차DD.md`). The diversification cap (`max_chunks_per_file=2`) doesn't help because its backfill path pulls more chunks from the same file when no other file is in the candidate pool. Profile note wins because it contains all the deal_pipeline auto-summary fields that match general terms ("회사", "투자", company name); meeting notes contain technical specifics that don't BM25-hit on "리스크/핵심" etc. Possible fixes: (a) when company filter is active, force-include head chunk of each meeting under that company; (b) tweak RRF or BM25 weighting against the profile pattern; (c) include `chunk_idx=0 of every same-company file` as guaranteed candidates before diversification. Needs design before patching.
+### Phase 1D Gate ✅ MET
+- [x] **`eval_set.yaml` v2** (2026-05-02, 20 items: 회사 5/인물 3/시간 3/필터+의미 4/작성 2/skip-placeholders 3 for 정량+인사이트 needing user judgment). Auto-verifiable `expected_files`/companies/persons; `must_contain` set only on `메타씨앤아이_1차dd` where chunk content was inspected directly.
+- [x] **Retrieval bug fix landed** (commit `f61868a`): hybrid_search now augments the candidate pool with head chunks (`chunk_idx=0`) of WHERE-matching files that didn't make RRF, so sibling meeting notes can reach top-K via diversification. Also re-indexed 25 dated meeting files whose `company` field was stored as raw `[[X]]` (pre-wikilink-unwrap legacy rows).
+- [x] **Baseline → after-fix**: `file_match_rate 0.615 → 0.882` (gate ≥ 0.7 cleared). Saved `rag/eval/results/v2_baseline.json`. Reranker still no help (the win is metadata-side breadth, not ranking).
 - [ ] **Vault hygiene one-off**: `Blueward_20260419_1차DD.md` content does NOT appear to be about Blueward — it's about an SAP/STO consulting firm (참석자 "최원영전무, 정래진 본부장", content "아이에스티엔/INF컨설팅"). Either the file is mis-named or the wrong meeting got pasted in. User should review.
+- [ ] **Query analyzer over-extracts (eval found 2 cases)**:
+  - "Antonio가 투자한 업체들" → analyzer flags `person=Antonio` (it IS a person profile in 02_Persons/Antonio/) → returns just that one note. Intended meaning: enumerate companies under `03_Companies/Antonio/투자업체/`. Needs analyzer prompt nudge to recognize "Antonio가 투자한" as "filter by reviewer", not "person lookup".
+  - "케이런 7호 펀드 정기조합원총회" → analyzer extracts `companies=['케이런 7호 펀드']` which doesn't exist as a company name → 0 hits. Pension/fund references shouldn't be parsed as companies.
+  - Both surfaced by eval; not in scope for the retrieval fix above.
+- [ ] **`--refresh-metadata` is broken** (`ArrowTypeError: Expected bytes, got a 'float' object`). Workaround: identify affected files, re-index via Python `index_files()`. Worth fixing if this kind of bulk-metadata refresh is needed again.
 
 ### Pending user actions (carried over from earlier sessions)
 - [ ] **Run PDF ingest once** (4 PDFs only, fast): `uv run python -m rag.ingest.attachment_loader --full`.
