@@ -162,11 +162,7 @@ These were learned the hard way; preserve the rationale.
 
 ### Most likely next steps (resume here)
 - [ ] **Plugin field-test (in progress)** — user is using the Obsidian sidebar in real work. Collect failures: bad citations, wrong category bucket, missing files in enumerate, slow first-query (BGE-M3 model load takes ~10s). When the user reports an issue, FIRST hit `/ask/json` with the same query to inspect raw citations before debugging the LLM output.
-- [ ] **Vault data hygiene (Claude already flags these in answers)** — examples found in this session:
-  - `시너지_20260429_1차DD.md` `company: [[meeting]]` → `[[시너지]]`
-  - `투자팀회의_20260420.md` `date: 2026-04-19` → `2026-04-20`
-  - VC협회 / 스케일업 팁스 노트 중복 (날짜 suffix 있음/없음 두 개)
-  - Consider: `scripts/audit_frontmatter.py` to spot `company`/`person` values that don't unwrap cleanly, dates that disagree with filename pattern.
+- [x] **Vault data hygiene** — `scripts/audit_frontmatter.py` added (2026-05-02). Detects 3 issue classes (suspicious_link, date_mismatch, possible_duplicate) and supports `--fix-dates` / `--fix-suspicious` for safe auto-fixes. Initial run fixed 4 date mismatches + 2 `[[meeting]]` wikilinks. VC협회/스케일업 팁스 "duplicates" turned out to be intentional event dashboards (`type: event`); audit now skips index-typed undated siblings. Re-run anytime; should stay at 0 findings unless new bad data appears.
 - [ ] **More enumerate-mode validation** — try variations and watch for misses:
   - "지난주 만난 사람들" (인물 + 짧은 date range)
   - "올해 IR 받은 회사" (date range + tag-ish: IR)
