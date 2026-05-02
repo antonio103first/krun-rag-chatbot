@@ -136,6 +136,11 @@ def render_sidebar() -> dict[str, Any]:
         )
         show_search_details = st.toggle("검색 세부 정보 표시", value=False)
         top_k = st.slider("최종 청크 개수 (top-K)", 4, 20, value=s.retrieval.final_top_k)
+        max_per_file = st.slider(
+            "파일당 최대 청크 (다양화)", 1, 10,
+            value=max(s.retrieval.max_chunks_per_file, 1),
+            help="한 노트의 여러 섹션이 top-K를 독점하지 않도록 제한",
+        )
 
         st.divider()
         st.subheader("관리")
@@ -214,6 +219,7 @@ def render_sidebar() -> dict[str, Any]:
         "use_reranker": use_reranker,
         "show_search_details": show_search_details,
         "top_k": top_k,
+        "max_per_file": max_per_file,
     }
 
 
@@ -308,6 +314,7 @@ def handle_query(query: str, sidebar: dict) -> None:
                 update={
                     "final_top_k": sidebar["top_k"],
                     "reranker_enabled": sidebar["use_reranker"],
+                    "max_chunks_per_file": sidebar["max_per_file"],
                 }
             )
             result = hybrid_search(
@@ -337,6 +344,8 @@ def handle_query(query: str, sidebar: dict) -> None:
                         "fused_top_k": result.fused_count,
                         "reranked": result.reranked,
                         "rerank_pool_size": result.rerank_pool_size,
+                        "diversified": result.diversified,
+                        "distinct_files": result.distinct_files,
                     }
                 )
 

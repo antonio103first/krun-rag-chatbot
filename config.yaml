@@ -70,11 +70,12 @@ bm25:
 retrieval:
   bm25_top_k: 30
   vector_top_k: 30
-  rrf_k: 60               # Reciprocal Rank Fusion constant
-  final_top_k: 8          # Chunks sent to the generator
-  reranker_enabled: false # Phase 1D toggle (uv sync --extra rerank to enable)
+  rrf_k: 60                 # Reciprocal Rank Fusion constant
+  final_top_k: 8            # Chunks sent to the generator
+  max_chunks_per_file: 2    # diversify: cap chunks per file in final top-K (0 = no cap)
+  reranker_enabled: false   # Phase 1D toggle (uv sync --extra rerank to enable)
   reranker_model: "BAAI/bge-reranker-v2-m3"
-  rerank_pool_size: 30    # candidates passed to the cross-encoder when enabled
+  rerank_pool_size: 30      # candidates passed to the cross-encoder when enabled
 
 # --- Generation --------------------------------------------------------------
 generation:

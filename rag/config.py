@@ -97,6 +97,7 @@ class RetrievalConfig(BaseModel):
     vector_top_k: int = 30
     rrf_k: int = 60
     final_top_k: int = 8
+    max_chunks_per_file: int = 2  # diversify: cap chunks per file in final top-K
     reranker_enabled: bool = False
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
 

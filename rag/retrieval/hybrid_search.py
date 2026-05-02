@@ -6,13 +6,14 @@ Pipeline:
 3. Run ANN vector search with the same `where` (top `vector_top_k`).
 4. Apply the same `where` to BM25 hits post-hoc (BM25 has no metadata index).
 5. Reciprocal-rank-fuse the two ranked lists.
-6. If `reranker_enabled`, score the fused pool with a cross-encoder and
-   reorder. Otherwise truncate to `final_top_k` directly.
+6. If `reranker_enabled`, score the fused pool with a cross-encoder and reorder.
+7. Diversify by file_path: cap chunks per file at `max_chunks_per_file` so
+   one note's many sections can't crowd out other relevant files.
 """
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 
 import numpy as np
@@ -33,6 +34,37 @@ class HybridSearchResult:
     fused_count: int
     reranked: bool = False
     rerank_pool_size: int = 0
+    diversified: bool = False
+    distinct_files: int = 0
+
+
+def _diversify_by_file(rows: list[dict], max_per_file: int, top_k: int) -> list[dict]:
+    """Cap how many chunks a single file may contribute, preserving order.
+
+    `max_per_file <= 0` disables the cap.
+    """
+    if max_per_file <= 0 or not rows:
+        return rows[:top_k]
+    seen: Counter[str] = Counter()
+    out: list[dict] = []
+    for r in rows:
+        fp = r.get("file_path") or ""
+        if seen[fp] >= max_per_file:
+            continue
+        out.append(r)
+        seen[fp] += 1
+        if len(out) >= top_k:
+            break
+    # If diversification truncated below top_k (rare: very few distinct files),
+    # backfill from remaining rows ignoring the cap so we still return top_k.
+    if len(out) < top_k:
+        chosen = {id(r) for r in out}
+        for r in rows:
+            if len(out) >= top_k:
+                break
+            if id(r) not in chosen:
+                out.append(r)
+    return out
 
 
 # --- WHERE clause builder --------------------------------------------------
@@ -134,8 +166,9 @@ def hybrid_search(
             bm25_hit_count=0, vector_hit_count=0, fused_count=0,
         )
 
-    # When the reranker is on, we fuse to a *bigger* candidate pool than
-    # `final_top_k` so the cross-encoder has more signal to work with.
+    # We always fuse to a larger pool than `final_top_k` so that diversification
+    # and (optional) reranking have headroom. When the reranker is on, this
+    # also gives the cross-encoder more signal to work with.
     use_reranker = bool(getattr(cfg, "reranker_enabled", False))
     if use_reranker and reranker is None:
         try:
@@ -144,7 +177,9 @@ def hybrid_search(
         except ImportError:
             use_reranker = False  # FlagEmbedding not installed; gracefully fall back
 
-    pool_size = max(cfg.bm25_top_k, cfg.vector_top_k) if use_reranker else cfg.final_top_k
+    max_per_file = getattr(cfg, "max_chunks_per_file", 0) or 0
+    diversify = max_per_file > 0
+    pool_size = max(cfg.bm25_top_k, cfg.vector_top_k) if (use_reranker or diversify) else cfg.final_top_k
     fused = rrf_fuse([bm25_ids, vector_ids], k=cfg.rrf_k, top_k=pool_size)
     fused_ids = [cid for cid, _ in fused]
 
@@ -160,14 +195,18 @@ def hybrid_search(
     if use_reranker and pool:
         passages = [r.get("text") or "" for r in pool]
         try:
-            ranked = reranker.rerank(rewritten, passages, top_k=cfg.final_top_k)  # type: ignore[union-attr]
-            ordered = [pool[i] for i, _ in ranked]
+            ranked = reranker.rerank(rewritten, passages, top_k=len(pool))  # type: ignore[union-attr]
+            pool = [pool[i] for i, _ in ranked]
         except Exception:
-            ordered = pool[: cfg.final_top_k]
             use_reranker = False
+
+    # 7. Diversify by file_path, then cut to final_top_k.
+    if diversify:
+        ordered = _diversify_by_file(pool, max_per_file=max_per_file, top_k=cfg.final_top_k)
     else:
         ordered = pool[: cfg.final_top_k]
 
+    distinct_files = len({r.get("file_path") or "" for r in ordered})
     return HybridSearchResult(
         rows=ordered,
         where_clause=where,
@@ -176,6 +215,8 @@ def hybrid_search(
         fused_count=len(ordered),
         reranked=use_reranker,
         rerank_pool_size=len(pool) if use_reranker else 0,
+        diversified=diversify,
+        distinct_files=distinct_files,
     )
 
 

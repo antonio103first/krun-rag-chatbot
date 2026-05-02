@@ -155,16 +155,68 @@ uv run python -m rag.ingest.pipeline --full
 
 또는 Streamlit 사이드바의 **🔄 신규/변경 노트 인덱싱** 버튼 사용.
 
-### 리랭커 (선택, 정확도 +10~15%)
+### Phase 1D 옵션 패키지 한 번에 설치
+
+`uv sync --extra rerank` 같이 단일 extra만 지정하면 다른 extras(예: `phase1a`)가 **제거**됩니다. 모든 옵션을 함께 설치하려면:
 
 ```powershell
-# 의존성 설치 (FlagEmbedding ~600MB)
-uv sync --extra rerank
-
-# config.yaml에서 `reranker_enabled: true` 또는 Streamlit 토글로 사용
+# 권장 — phase1a + reranker + PDF + kiwipiepy 한꺼번에
+uv sync --extra phase1d
 ```
 
-리랭커 ON시 검색당 +200ms (CPU) 부하가 발생하지만 Recall@8이 보통 0.10-0.15 향상됩니다.
+### 리랭커 (선택, 정확도 +10~15%)
+
+`uv sync --extra phase1d` 후 `config.yaml`에서 `reranker_enabled: true` 또는 Streamlit 사이드바 "리랭커" 토글로 사용.
+
+검색당 +200ms (CPU) 부하가 발생하지만 Recall@8이 보통 0.10-0.15 향상됩니다.
+
+### 라이브 인덱싱 (watcher)
+
+Obsidian에서 노트를 저장하면 자동으로 LanceDB가 갱신됩니다.
+
+```powershell
+# 별도 터미널에서 실행 (Streamlit과 동시 실행 가능)
+uv run python -m rag.watcher
+```
+
+- 디바운스 2초 (저장 직후 2초 후 인덱싱)
+- 신규/수정/삭제/이동 모두 자동 처리
+- Ctrl-C로 중지
+
+### PDF 첨부 인덱싱
+
+`![[file.pdf]]` 형식으로 노트에 임베드된 PDF의 본문을 추출해 인덱싱합니다.
+
+```powershell
+uv sync --extra phase1d   # pymupdf 필요
+uv run python -m rag.ingest.attachment_loader --full
+```
+
+### 검색 진단 (왜 못 찾을까?)
+
+특정 노트가 검색에 안 잡히면 직접 LanceDB를 들여다봅니다.
+
+```powershell
+uv run python scripts/diagnose_search.py --person "정경원 사장"
+uv run python scripts/diagnose_search.py --company Blueward --show-text
+uv run python scripts/diagnose_search.py --file 정경원
+uv run python scripts/diagnose_search.py --doc-type meeting --date-from 2026-04-22
+```
+
+### Eval 자동 측정
+
+```powershell
+# 1. 템플릿 복사 (gitignored 됨)
+Copy-Item rag/eval/eval_set.example.yaml rag/eval/eval_set.yaml
+notepad rag/eval/eval_set.yaml   # 30개 질문 채우기
+
+# 2. 실행
+uv run python -m rag.eval.run_eval
+uv run python -m rag.eval.run_eval --reranker-on --output rag/eval/results/run1.json
+uv run python -m rag.eval.run_eval --no-generate    # 검색만
+```
+
+Phase 1D Gate: `file_match_rate ≥ 0.7`
 
 ---
 
