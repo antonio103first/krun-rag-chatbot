@@ -174,12 +174,14 @@ These were learned the hard way; preserve the rationale.
 - [x] **`eval_set.yaml` v2** (2026-05-02, 20 items: 회사 5/인물 3/시간 3/필터+의미 4/작성 2/skip-placeholders 3 for 정량+인사이트 needing user judgment). Auto-verifiable `expected_files`/companies/persons; `must_contain` set only on `메타씨앤아이_1차dd` where chunk content was inspected directly.
 - [x] **Retrieval bug fix landed** (commit `f61868a`): hybrid_search now augments the candidate pool with head chunks (`chunk_idx=0`) of WHERE-matching files that didn't make RRF, so sibling meeting notes can reach top-K via diversification. Also re-indexed 25 dated meeting files whose `company` field was stored as raw `[[X]]` (pre-wikilink-unwrap legacy rows).
 - [x] **Baseline → after-fix**: `file_match_rate 0.615 → 0.882` (gate ≥ 0.7 cleared). Saved `rag/eval/results/v2_baseline.json`. Reranker still no help (the win is metadata-side breadth, not ranking).
-- [ ] **Vault hygiene one-off**: `Blueward_20260419_1차DD.md` content does NOT appear to be about Blueward — it's about an SAP/STO consulting firm (참석자 "최원영전무, 정래진 본부장", content "아이에스티엔/INF컨설팅"). Either the file is mis-named or the wrong meeting got pasted in. User should review.
-- [ ] **Query analyzer over-extracts (eval found 2 cases)**:
-  - "Antonio가 투자한 업체들" → analyzer flags `person=Antonio` (it IS a person profile in 02_Persons/Antonio/) → returns just that one note. Intended meaning: enumerate companies under `03_Companies/Antonio/투자업체/`. Needs analyzer prompt nudge to recognize "Antonio가 투자한" as "filter by reviewer", not "person lookup".
-  - "케이런 7호 펀드 정기조합원총회" → analyzer extracts `companies=['케이런 7호 펀드']` which doesn't exist as a company name → 0 hits. Pension/fund references shouldn't be parsed as companies.
-  - Both surfaced by eval; not in scope for the retrieval fix above.
-- [ ] **`--refresh-metadata` is broken** (`ArrowTypeError: Expected bytes, got a 'float' object`). Workaround: identify affected files, re-index via Python `index_files()`. Worth fixing if this kind of bulk-metadata refresh is needed again.
+- [x] **Analyzer prompt fixes** (commit `7b96cd6`): "Antonio" / "내가" / "본인" excluded from `persons`; fund references ("케이런 N호 펀드") routed to `doc_types=["project"]` not `companies`. enumerate path now also fires from doc_types-only when no other WHERE filter is set. → Antonio_투자업체_리스트 case 0/4 → 4/4 ✅
+- [x] **`--refresh-metadata` fixed** (commit `64b9de6`): pandas NaN was leaking through `row.get(x) or default` because NaN is truthy in Python. NaN-safe coercion added; full vault refresh now runs in 1.9s for 4,487 chunks.
+- [x] **Final eval (full LLM-generation run)**: file_match_rate=0.941 (16/17), must_contain_rate=0.941, avg_latency=12.86s. Saved `rag/eval/results/v4_full.json`. Last file miss is 펀드7호_정기조합원총회 (hybrid path doesn't apply doc_type filter so the right file gets buried under 5 daily/주간회의 chunks). Last must_contain miss is 메타씨앤아이_1차dd looking for "마이크로" + "디스플레이" — answer used "OLEDos" / "OLED" so substring matcher missed; lesson: must_contain on Korean technical terms is brittle, prefer multiple OR-able alternatives.
+
+### Open follow-ups (post-Gate)
+- [ ] **Vault hygiene one-off — needs user judgment**: `Blueward_20260419_1차DD.md` body content is **아이에스티엠/아이에스티엔** (SAP/STO consulting, INF컨설팅 합병, 참석자 최원영전무·정래진본부장, 회의록 timestamp 2026-03-11). frontmatter `created: 2026-03-11`. Filename `_20260419` likely wrong. Vault has no `아이에스티*` folder. User to: (a) create `03_Companies/.../아이에스티엠/`, rename + move file, (b) recreate the actual Blueward 1차DD note from source. Then `--incremental`.
+- [ ] **펀드7호 retrieval miss**: hybrid path treats doc_type as suggestion. For queries where analyzer returns ONLY `doc_types` (no companies/persons/dates), consider applying doc_type as WHERE. Risky for general queries — needs design.
+- [ ] **must_contain robustness**: add `must_contain_any` (OR semantics) so terminology variants (마이크로/Micro/OLEDos) pass. Or replace with claim-by-claim LLM judge.
 
 ### Pending user actions (carried over from earlier sessions)
 - [ ] **Run PDF ingest once** (4 PDFs only, fast): `uv run python -m rag.ingest.attachment_loader --full`.
