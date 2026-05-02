@@ -1,6 +1,6 @@
 """Audit vault frontmatter for issues that confuse the RAG pipeline.
 
-Reports three classes of problem:
+Reports four classes of problem:
 
 1. **suspicious_link**   `company:` / `person:` / `lead_investor:` value unwraps to a
    generic word (`meeting`, `company`, `person`, …) — almost always a bad wikilink
@@ -13,6 +13,12 @@ Reports three classes of problem:
    `VC협회_조찬세미나_20260420`). The undated-stem file usually represents the
    same event written twice. Profile/meeting pairs (`정경원 사장` +
    `정경원 사장_20260313_석식`) don't trigger because profiles have no `date` field.
+4. **content_filename_mismatch** Meeting note's body never mentions the entity
+   its filename names (or any registered alias from `config/aliases.yaml`). This
+   catches cases like `Blueward_20260419_1차DD.md` whose body is actually about
+   another company. Skips known sub-meeting subjects (주간회의, 투자팀회의, …)
+   and event-name subjects (신한OI, KDB, …) where the literal subject string
+   wouldn't be expected in the body.
 
 Default behavior is read-only. Pass `--fix-dates` to rewrite the frontmatter
 `date` field so it matches the filename (filename is authoritative per the
@@ -44,6 +50,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import frontmatter  # noqa: E402
 
+from rag.aliases import all_variants, mention_count  # noqa: E402
 from rag.config import get_settings  # noqa: E402
 from rag.ingest.md_loader import is_excluded, list_vault_md, load_note  # noqa: E402
 from rag.ingest.metadata import (  # noqa: E402
@@ -53,6 +60,31 @@ from rag.ingest.metadata import (  # noqa: E402
     _parse_yyyymmdd,
     _unwrap_wikilink,
 )
+
+# Subjects whose name is a category, not an entity that would be mentioned in
+# the body (skip the content_filename_mismatch check for these).
+_CATEGORY_SUBJECTS = {
+    "주간회의", "투자팀회의", "관리팀회의", "파트너회의", "사내회의",
+    "신한OI", "KDB", "V런치", "OI",
+    "AX", "영업보고", "Catholic_전례", "Catholic_복사", "Catholic_상임위",
+    "Catholic_봉사", "Catholic_교육", "골프", "여행", "회사",
+}
+
+# Korean person-title suffixes — for person notes like "강규식 상무" we also
+# search for the bare name "강규식" in case the body uses just that.
+_TITLE_SUFFIXES = (
+    " 상무", " 대표", " 부사장", " 사장", " 회장", " 이사", " 전무",
+    " 본부장", " 팀장", " 부장", " 차장", " 과장", " 매니저", " 원장",
+    " 1차관", " 차관", " 장관", " 기자", " 박사", " 변호사", " 감사",
+    " 안드레아", " 베드로", " 프란치스코",  # Catholic given names
+)
+
+
+def _person_short(name: str) -> str | None:
+    for suf in _TITLE_SUFFIXES:
+        if name.endswith(suf):
+            return name[: -len(suf)].strip() or None
+    return None
 
 # Generic tokens that should never appear as company/person/investor names.
 # If we see `company: [[meeting]]`, it's a stale template value.
@@ -106,6 +138,11 @@ def main() -> int:
     p.add_argument("--fix-suspicious", action="store_true",
                    help="For suspicious company values under 03_Companies/{Antonio|KRUN}/<stage>/<X>/, "
                         "rewrite to [[X]] using the folder name (irreversible)")
+    p.add_argument("--check-content", action="store_true",
+                   help="Also check that company-meeting body text mentions the company filename "
+                        "subject (or any alias from config/aliases.yaml). High-recall low-precision: "
+                        "flags ~5-10%% of meetings; review each manually. Skips 02_Persons (body "
+                        "usually talks ABOUT the meeting topic, not the person).")
     p.add_argument("--limit", type=int, default=200, help="Cap printed entries per category")
     args = p.parse_args()
 
@@ -159,6 +196,40 @@ def main() -> int:
             "has_date_suffix": _DATE_TAIL_RE.search(note.title) is not None,
             "fm_type": (str(fm.get("type") or fm.get("fileClass") or "")).strip().lower(),
         })
+
+        # 4. content_filename_mismatch — opt-in via --check-content.
+        # Restrict to 03_Companies/.. meeting notes (high-signal scope).
+        # Person notes (02_Persons/..) are skipped — bodies usually summarize
+        # the meeting topic, not the person's name. Event notes are also out
+        # of scope (subject is event-name, not entity-mentioned-in-body).
+        m = _PATTERN_SUBJECT_DATE_STAGE.match(note.title) if args.check_content else None
+        if m and rel.parts and rel.parts[0] == "03_Companies":
+            subject = m["subject"].strip()
+            body = note.body or ""
+            if subject and subject not in _CATEGORY_SUBJECTS and len(body) >= 400:
+                # Build candidate strings: subject + aliases (companies +
+                # persons buckets) + bare-name variant for titled persons.
+                candidates: set[str] = {subject}
+                candidates.update(all_variants(subject, kind="companies"))
+                candidates.update(all_variants(subject, kind="persons"))
+                if (short := _person_short(subject)) and len(short) >= 2:
+                    candidates.add(short)
+                # Cheap brand-shortname heuristic: for company names ending in
+                # "로보틱스/시스템즈/테크놀로지스" or English suffixes, also try
+                # the prefix (디든로보틱스 → 디든; LinkedIn → Link).
+                for suf in ("로보틱스", "시스템즈", "테크놀로지스", "테크놀로지",
+                            "솔루션", "네트웍스", "네트워크", "코리아"):
+                    if subject.endswith(suf) and len(subject) > len(suf) + 1:
+                        candidates.add(subject[: -len(suf)].rstrip())
+                hits = mention_count(body, candidates)
+                if hits == 0:
+                    body_preview = body.strip().replace("\n", " ")[:160]
+                    findings["content_filename_mismatch"].append({
+                        "file": rel.as_posix(),
+                        "subject": subject,
+                        "checked": sorted(c for c in candidates if c),
+                        "body_preview": body_preview,
+                    })
 
     # 3. Duplicate detection (tight rule):
     # Group by root stem. Skip auto-generated roots. A group is flagged ONLY when
@@ -245,7 +316,8 @@ def main() -> int:
     print(f"Scanned: {len(files)} markdown files")
     print("=" * 72)
 
-    for category in ("load_error", "suspicious_link", "date_mismatch", "possible_duplicate"):
+    for category in ("load_error", "suspicious_link", "date_mismatch",
+                     "possible_duplicate", "content_filename_mismatch"):
         items = findings.get(category, [])
         print(f"\n## {category}  ({len(items)})")
         if not items:
@@ -262,6 +334,10 @@ def main() -> int:
                 print(f"  root: {entry['root']}")
                 for f in entry["files"]:
                     print(f"      - {f['file']}   (date={f['date']})")
+            elif category == "content_filename_mismatch":
+                print(f"  {entry['file']}")
+                print(f"      subject: {entry['subject']!r}  (also tried: {entry['checked']})")
+                print(f"      body[:160]: {entry['body_preview']}")
             else:
                 print(f"  {entry}")
         if len(items) > args.limit:

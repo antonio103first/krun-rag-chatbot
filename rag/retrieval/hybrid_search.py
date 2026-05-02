@@ -155,6 +155,11 @@ def build_where_clause(analysis: QueryAnalysis | None) -> str | None:
         parts.append(f"date >= '{_q(analysis.date_from)}'")
     if analysis.date_to:
         parts.append(f"date <= '{_q(analysis.date_to)}'")
+    # doc_type intentionally NOT used as WHERE in hybrid mode. We tried it as
+    # a fallback when no other filter was set, but the analyzer too often emits
+    # doc_types alone (e.g. "시너지 검토 진행" → just `project` because the
+    # word 시너지 reads as "synergy"). The resulting narrow WHERE drops the
+    # actual answer files. enumerate mode does its own doc_type handling.
     return " AND ".join(parts) if parts else None
 
 
@@ -299,7 +304,11 @@ def hybrid_search(
         head_where = f"({where}) AND chunk_idx = 0"
         head_rows = store.search_by_filter(head_where, limit=cfg.final_top_k * 4)
         # Order by date desc so the most recent siblings get added first when capped.
-        head_rows.sort(key=lambda r: (r.get("date") or ""), reverse=True)
+        # NaN-safe: date can be NaN (float) when missing; coerce to "" for sort.
+        def _sort_key(r):
+            d = r.get("date")
+            return d if isinstance(d, str) else ""
+        head_rows.sort(key=_sort_key, reverse=True)
         for r in head_rows:
             fp = r.get("file_path") or ""
             if fp in pool_files or r["chunk_id"] in rows_by_id:

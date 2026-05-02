@@ -139,8 +139,19 @@ def _evaluate_item(
     answer_lower = (res.answer or "").lower()
     must_contain = [s.lower() for s in (item.get("must_contain") or [])]
     must_not_contain = [s.lower() for s in (item.get("must_not_contain") or [])]
+    # `must_contain_any`: list of OR-groups. Each group is a list of acceptable
+    # variants (e.g. [["마이크로", "Micro"], ["디스플레이", "OLEDos"]]). Passes if
+    # at least one variant in EACH group is in the answer. Robust to
+    # terminology choices the LLM makes.
+    must_contain_any = item.get("must_contain_any") or []
     if must_contain:
         res.must_contain_pass = all(s in answer_lower for s in must_contain)
+    if must_contain_any and res.must_contain_pass:
+        for group in must_contain_any:
+            variants = [str(v).lower() for v in (group or [])]
+            if variants and not any(v in answer_lower for v in variants):
+                res.must_contain_pass = False
+                break
     if must_not_contain:
         res.must_not_contain_pass = not any(s in answer_lower for s in must_not_contain)
 

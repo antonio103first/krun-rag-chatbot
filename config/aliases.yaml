@@ -1,0 +1,23 @@
+# Vault entity aliases — variant spellings, mergers, English/Korean pairs.
+#
+# The canonical name is the key (typically the CURRENT name as it appears in
+# vault folder structure). The list is variant strings that should be treated
+# as the same entity.
+#
+# Used by:
+#   - scripts/audit_frontmatter.py (content_filename_mismatch check)
+#   - rag/aliases.py (importable module — used in audit, ready for retrieval)
+#
+# Add new entries when you discover variants/typos. Keep entries in sync with
+# any folder/file renames in the vault.
+
+companies:
+  Blueward:
+    - 블루워드
+    - 아이에스티엔        # 합병 전 사명 (2025-10 합병 흡수)
+    - 아이에스티엠        # 한자/표기 변형
+    - ISTN
+    - ISTM
+    - INF컨설팅           # 2025-10 합병 흡수
+
+persons: {}
