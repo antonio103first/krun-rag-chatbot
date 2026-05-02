@@ -102,6 +102,28 @@
   background: var(--background-secondary);
   padding: 6px 8px;
   border-radius: 6px;
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+
+.krun-rag-turn-toolbar {
+  display: flex;
+  gap: 6px;
+  font-size: 10px;
+}
+.krun-rag-turn-toolbar button {
+  padding: 1px 6px;
+  font-size: 10px;
+  background: transparent;
+  border: 1px solid var(--background-modifier-border);
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 3px;
+}
+.krun-rag-turn-toolbar button:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
 }
 
 .krun-rag-turn-meta {
@@ -116,6 +138,9 @@
   white-space: pre-wrap;
   line-height: 1.5;
   color: var(--text-normal);
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
 }
 
 .krun-rag-turn-answer .krun-rag-cite {
@@ -152,7 +177,8 @@
   padding: 4px 6px;
   border-radius: 4px;
   background: var(--background-primary-alt);
-  cursor: pointer;
+  user-select: text;
+  -webkit-user-select: text;
 }
 .krun-rag-citation:hover {
   background: var(--background-modifier-hover);
@@ -160,15 +186,26 @@
 .krun-rag-citation-title {
   font-size: 11px;
   font-weight: 600;
+  cursor: pointer;
+  color: var(--text-accent);
+}
+.krun-rag-citation-title:hover {
+  text-decoration: underline;
 }
 .krun-rag-citation-meta {
   font-size: 10px;
   color: var(--text-muted);
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
 }
 .krun-rag-citation-snippet {
   font-size: 10px;
   color: var(--text-faint);
   font-style: italic;
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
 }
 
 .krun-rag-error {
