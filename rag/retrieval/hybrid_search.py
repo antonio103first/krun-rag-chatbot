@@ -36,6 +36,7 @@ class HybridSearchResult:
     rerank_pool_size: int = 0
     diversified: bool = False
     distinct_files: int = 0
+    augmented_files: int = 0  # head chunks added via filter-aware breadth augmentation
     mode: str = "hybrid"  # "hybrid" | "enumerate"
 
 
@@ -277,6 +278,32 @@ def hybrid_search(
         for r in store.search_by_filter(clause, limit=len(batch)):
             rows_by_id[r["chunk_id"]] = r
     pool = [rows_by_id[cid] for cid in fused_ids if cid in rows_by_id]
+    augmented = 0
+
+    # 5.5. Filter-aware breadth augmentation. When WHERE narrows the corpus to a
+    # small set of files (e.g. company='메타씨앤아이'), the pool can be filled
+    # entirely by chunks from one chunk-rich file (the company profile note),
+    # leaving zero shot for sibling meeting notes to reach top-K via
+    # diversification. We append head chunks (chunk_idx=0) of WHERE-matching
+    # files that the pool doesn't yet cover, so diversification can distribute
+    # representation across all matching files. Only meaningful when
+    # diversification is on (otherwise pool[:top_k] never sees the appended rows).
+    if where and diversify:
+        pool_files = {r.get("file_path") or "" for r in pool}
+        head_where = f"({where}) AND chunk_idx = 0"
+        head_rows = store.search_by_filter(head_where, limit=cfg.final_top_k * 4)
+        # Order by date desc so the most recent siblings get added first when capped.
+        head_rows.sort(key=lambda r: (r.get("date") or ""), reverse=True)
+        for r in head_rows:
+            fp = r.get("file_path") or ""
+            if fp in pool_files or r["chunk_id"] in rows_by_id:
+                continue
+            pool.append(r)
+            pool_files.add(fp)
+            rows_by_id[r["chunk_id"]] = r
+            augmented += 1
+            if augmented >= cfg.final_top_k:
+                break
 
     # 6. Optional cross-encoder rerank on the fused pool.
     if use_reranker and pool:
@@ -304,6 +331,7 @@ def hybrid_search(
         rerank_pool_size=len(pool) if use_reranker else 0,
         diversified=diversify,
         distinct_files=distinct_files,
+        augmented_files=augmented,
     )
 
 
