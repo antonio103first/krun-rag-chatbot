@@ -40,7 +40,9 @@ class HybridSearchResult:
 
 
 # --- Enumerate mode: pure metadata WHERE, one chunk per file --------------
-ENUMERATE_LIMIT = 50
+# 200 covers "올해 미팅" (~88 files) and most year-scoped enumerations while
+# keeping total tokens (head chunks only, ~500 tokens each) under ~100K.
+ENUMERATE_LIMIT = 200
 
 
 def enumerate_search(
