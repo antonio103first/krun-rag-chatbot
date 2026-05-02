@@ -144,12 +144,31 @@ def build_where_clause(analysis: QueryAnalysis | None) -> str | None:
     if analysis is None:
         return None
 
+    from rag.aliases import all_variants
+
     parts: list[str] = []
     if analysis.companies:
-        joined = ", ".join(f"'{_q(c)}'" for c in analysis.companies)
+        # Expand each company through the alias table so a query referring to
+        # a predecessor name (e.g. "ISTN") still matches files filed under the
+        # current canonical name (Blueward). Dedupe while preserving order.
+        seen: set[str] = set()
+        expanded: list[str] = []
+        for c in analysis.companies:
+            for v in all_variants(c, kind="companies"):
+                if v not in seen:
+                    seen.add(v)
+                    expanded.append(v)
+        joined = ", ".join(f"'{_q(c)}'" for c in expanded)
         parts.append(f"company IN ({joined})")
     if analysis.persons:
-        joined = ", ".join(f"'{_q(p)}'" for p in analysis.persons)
+        seen_p: set[str] = set()
+        expanded_p: list[str] = []
+        for p in analysis.persons:
+            for v in all_variants(p, kind="persons"):
+                if v not in seen_p:
+                    seen_p.add(v)
+                    expanded_p.append(v)
+        joined = ", ".join(f"'{_q(p)}'" for p in expanded_p)
         parts.append(f"person IN ({joined})")
     if analysis.date_from:
         parts.append(f"date >= '{_q(analysis.date_from)}'")
