@@ -234,16 +234,26 @@ def refresh_metadata(
             chunk_idx_raw = row["chunk_idx"]
             chunk_idx = int(chunk_idx_raw.item()) if hasattr(chunk_idx_raw, "item") else int(chunk_idx_raw)
 
+            # pandas NaN is truthy in Python, so `row.get(x) or default` lets
+            # NaN through and breaks pyarrow ("Expected bytes, got float"). Use
+            # an explicit NaN check before string coercion.
+            def _nan_safe(v, default=None):
+                if v is None:
+                    return default
+                if isinstance(v, float) and v != v:  # NaN
+                    return default
+                return v
+
             new_row = chunk_to_row(
                 chunk_meta=meta_dict,
-                chunk_text=row["text"],
+                chunk_text=_nan_safe(row.get("text"), default="") or "",
                 vector=vec_list,
                 chunk_id=row["chunk_id"],
                 chunk_idx=chunk_idx,
-                header_path=row.get("header_path") or "",
+                header_path=_nan_safe(row.get("header_path"), default="") or "",
                 raw_frontmatter=meta.raw_frontmatter,
-                source=row.get("source") or "md",
-                parent_path=row.get("parent_path") if row.get("parent_path") else None,
+                source=_nan_safe(row.get("source"), default="md") or "md",
+                parent_path=_nan_safe(row.get("parent_path")),
             )
             new_rows.append(new_row)
             stats.chunks_total += 1
