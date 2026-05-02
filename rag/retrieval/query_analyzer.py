@@ -54,6 +54,7 @@ Rules:
 - "Antonio" / "내가" / "본인" / "안토니오" refers to the system OWNER, not a third-party person. Do NOT add it to `persons`. When the query asks "Antonio가 투자한 업체들" or similar self-scoped enumeration, leave `persons` empty and let `intent=enumerate` + `doc_types=["company"]` carry the filter.
 - Fund / 펀드 references ("케이런 6호", "케이런 7호 펀드", "소부장2호", "펀드 N호") are NOT companies. Do NOT put them in `companies`. Add "project" to `doc_types` for fund-related questions (펀드LP관리 lives under 05_Projects).
 - 정기조합원총회 / 조합원총회 / LP보고 / LP미팅 → also "project" + "meeting".
+- "action item" / "액션 아이템" / "해야할 일" / "할 일" / "to-do" / "todo" / "체크리스트" / "예정된 일정" / "예정 일정" → ALWAYS use intent="lookup" (NOT enumerate), even if a date range is given. These ask about content INSIDE notes (specific sections like ✅ Action Items / 📅 날짜지정), so we need hybrid search of body text, not a metadata-only file enumeration.
 
 Examples (today=2026-04-29):
 Q: 위밋모빌리티 1차DD 핵심 리스크
@@ -67,6 +68,9 @@ A: {"rewritten_query":"미팅한 회사","intent":"enumerate","companies":[],"pe
 
 Q: 강규식 상무와의 최근 미팅 액션아이템
 A: {"rewritten_query":"강규식 상무 미팅 액션아이템","intent":"lookup","companies":[],"persons":["강규식 상무"],"doc_types":["meeting"],"tags":[],"date_range":{"from":null,"to":null}}
+
+Q: 4월달 action item 예정된 일정
+A: {"rewritten_query":"action item 예정 일정","intent":"lookup","companies":[],"persons":[],"doc_types":["meeting","daily"],"tags":["action-item"],"date_range":{"from":"2026-04-01","to":"2026-04-30"}}
 
 Q: Antonio가 투자한 업체들 모두 리스트
 A: {"rewritten_query":"투자한 업체","intent":"enumerate","companies":[],"persons":[],"doc_types":["company"],"tags":[],"date_range":{"from":null,"to":null}}
