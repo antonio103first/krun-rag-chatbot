@@ -218,6 +218,30 @@ uv run python -m rag.eval.run_eval --no-generate    # 검색만
 
 Phase 1D Gate: `file_match_rate ≥ 0.7`
 
+### 예비검토보고서 자동 생성 (apps/prescreening_report.py)
+
+IR 자료(PDF / DOCX / PPTX)가 있는 폴더에서 회사 한 곳의 **예비검토보고서**(12-section 마크다운)를 Opus 4.7로 작성합니다. RAG/볼트와 독립된 단발 도구입니다 — `.env`의 `ANTHROPIC_API_KEY`만 공유합니다.
+
+```powershell
+# 1. 의존성 설치 (pymupdf + python-docx + python-pptx)
+uv sync --extra report
+
+# 2. 실행 — 회사명이 파일명에 포함된 IR 자료만 자동 선택
+uv run python -m apps.prescreening_report `
+    --input  "C:\Users\anton\Documents\Claude AI_Personal\Prescreening_Report\검토 IR 자료" `
+    --company 대우컴프레셔 `
+    --output "C:\Users\anton\Documents\Claude AI_Personal\Prescreening_Report\output"
+
+# 3. (선택) 폴더의 모든 파일을 회사명 무관하게 사용
+uv run python -m apps.prescreening_report ... --include-all
+
+# 4. (선택) 기존 보고서를 스타일 참고로 사용 (구조/어조만)
+uv run python -m apps.prescreening_report ... `
+    --template "C:\Users\anton\Documents\Obsidian_KRUN_Antonio\03_Companies\Antonio\검토단계\블루타일랩\블루타일랩_20260425_예비검토보고서.md"
+```
+
+출력: `{회사명}_{YYYYMMDD}_예비검토보고서.md` (YAML frontmatter + 12개 섹션 본문). 자료에 없는 사실은 `[자료 미기재]` / `[추가 확인 필요]`로 명시합니다.
+
 ---
 
 ## 보안 / 프라이버시

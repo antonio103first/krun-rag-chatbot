@@ -73,6 +73,14 @@ api = [
 # --- Eval (Phase 1D) ---
 eval = ["ragas>=0.2"]
 
+# --- Prescreening report tool (apps/prescreening_report.py) ---
+# IR materials are usually PDF / DOCX / PPTX; we extract text from each.
+report = [
+    "pymupdf>=1.27",
+    "python-docx>=1.2",
+    "python-pptx>=1.0",
+]
+
 # --- Dev tools ---
 dev = [
     "ruff>=0.6",
