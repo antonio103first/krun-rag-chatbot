@@ -55,6 +55,8 @@ Rules:
 - Fund / 펀드 references ("케이런 6호", "케이런 7호 펀드", "소부장2호", "펀드 N호") are NOT companies. Do NOT put them in `companies`. Add "project" to `doc_types` for fund-related questions (펀드LP관리 lives under 05_Projects).
 - 정기조합원총회 / 조합원총회 / LP보고 / LP미팅 → also "project" + "meeting".
 - "action item" / "액션 아이템" / "해야할 일" / "할 일" / "to-do" / "todo" / "체크리스트" / "예정된 일정" / "예정 일정" → ALWAYS use intent="lookup" (NOT enumerate), even if a date range is given. These ask about content INSIDE notes (specific sections like ✅ Action Items / 📅 날짜지정), so we need hybrid search of body text, not a metadata-only file enumeration.
+- Content-conditional listings — when the listing predicate is a SEMANTIC condition that requires reading note bodies (geography like "남부권/수도권", sector like "소부장/바이오", fund-purpose like "주목적/주요투자분야", deal-stage opinion, qualitative judgment) — use intent="lookup", NOT enumerate. enumerate is for predicates expressible as structural metadata filters only (date / company / person / doc_type). When the predicate is "X에 해당하는", "X인", "X 관련" with X being a body-content concept, stay in lookup so BM25/vector can find the right notes.
+- Bare-mention queries — "X 관련한 내용", "X에 대해 알려줘", "X 얘기", "X 어떻게 됐지" with NO additional context (no time qualifier, no doc_type hint, no other entity) → leave `companies` / `persons` EMPTY and just put X in `rewritten_query`. The user wants any note that mentions X, not a metadata-narrowed view. Reason: X may be mentioned only in passing inside someone else's meeting note (where the chunk's `company` / `person` metadata field is NULL or different), and a strict company/person WHERE filter would drop those hits. Only populate `companies` / `persons` when the query asks for a focused analysis OF that entity ("X 1차DD 리스크", "X 검토 진행상황", "X 미팅 요약") AND the entity is plausibly a vault-registered top-level subject.
 
 Examples (today=2026-04-29):
 Q: 위밋모빌리티 1차DD 핵심 리스크
@@ -77,6 +79,18 @@ A: {"rewritten_query":"투자한 업체","intent":"enumerate","companies":[],"pe
 
 Q: 케이런 7호 펀드 정기조합원총회 내용
 A: {"rewritten_query":"7호 펀드 정기조합원총회","intent":"lookup","companies":[],"persons":[],"doc_types":["project","meeting"],"tags":[],"date_range":{"from":null,"to":null}}
+
+Q: 7호조합 주목적 중 남부권에 해당하는 검토업체 리스트
+A: {"rewritten_query":"7호 펀드 주목적 남부권 검토 업체","intent":"lookup","companies":[],"persons":[],"doc_types":["meeting","company","project"],"tags":[],"date_range":{"from":null,"to":null}}
+
+Q: 소부장 분야 검토 회사 리스트
+A: {"rewritten_query":"소부장 검토 회사","intent":"lookup","companies":[],"persons":[],"doc_types":["meeting","company"],"tags":[],"date_range":{"from":null,"to":null}}
+
+Q: 로텀 관련한 내용
+A: {"rewritten_query":"로텀","intent":"lookup","companies":[],"persons":[],"doc_types":[],"tags":[],"date_range":{"from":null,"to":null}}
+
+Q: 박정인 담당자에 대해 알려줘
+A: {"rewritten_query":"박정인 담당자","intent":"lookup","companies":[],"persons":[],"doc_types":[],"tags":[],"date_range":{"from":null,"to":null}}
 """
 
 

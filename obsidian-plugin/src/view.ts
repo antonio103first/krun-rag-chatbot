@@ -11,6 +11,7 @@ interface Turn {
   metaEl: HTMLElement;
   rawAnswer: string;
   startedAt: number;
+  usedIndices?: number[]; // populated on `done`; restricts citation cards to ones the answer actually cites
 }
 
 export class KrunRagView extends ItemView {
@@ -201,7 +202,9 @@ export class KrunRagView extends ItemView {
           this.renderAnswerStreaming(turn);
         },
         onDone: (info) => {
+          turn.usedIndices = info.used_citation_indices ?? [];
           this.renderAnswerFinal(turn);
+          this.renderCitations(turn); // re-render: hides unused cards now that we know which [n] were cited
           const meta = turn.metaEl.textContent ?? "";
           turn.metaEl.setText(`${meta ? meta + " · " : ""}⏱ ${info.elapsed_seconds}s`);
           this.askBtn.disabled = false;
@@ -333,9 +336,19 @@ export class KrunRagView extends ItemView {
     const old = turn.answerEl.parentElement?.querySelector(".krun-rag-citations");
     if (old) old.remove();
     if (!turn.citations.length) return;
+    // After `done`, restrict to the citations the answer actually cites.
+    // Before `done` (during streaming), show all retrieved cards.
+    const visible = turn.usedIndices && turn.usedIndices.length
+      ? turn.citations.filter((c) => turn.usedIndices!.includes(c.n))
+      : turn.citations;
+    if (!visible.length) return;
     const block = turn.answerEl.parentElement!.createDiv({ cls: "krun-rag-citations" });
-    block.createDiv({ cls: "krun-rag-citations-header", text: `Sources (${turn.citations.length})` });
-    for (const c of turn.citations) {
+    const total = turn.citations.length;
+    const headerText = visible.length < total
+      ? `Sources (${visible.length} cited / ${total} retrieved)`
+      : `Sources (${total})`;
+    block.createDiv({ cls: "krun-rag-citations-header", text: headerText });
+    for (const c of visible) {
       const row = block.createDiv({ cls: "krun-rag-citation" });
       // Only the title is clickable — meta/snippet are plain selectable text
       // so the user can drag-select inside the citation card without

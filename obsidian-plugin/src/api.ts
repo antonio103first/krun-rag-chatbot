@@ -28,7 +28,7 @@ export interface AskCallbacks {
   onAnalysis?: (a: Record<string, unknown>) => void;
   onCitations?: (items: CitationOut[], whereClause: string | null) => void;
   onDelta?: (text: string) => void;
-  onDone?: (info: { elapsed_seconds: number; answer_length?: number }) => void;
+  onDone?: (info: { elapsed_seconds: number; answer_length?: number; used_citation_indices?: number[] }) => void;
   onError?: (msg: string) => void;
 }
 

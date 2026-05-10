@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 from collections.abc import Iterator
@@ -232,12 +233,20 @@ def ask_stream(req: AskRequest):
                 chunks.append(chunk)
                 yield _sse("delta", {"text": chunk})
 
-            # We don't have token usage from stream_iter; emit a "done" with elapsed.
+            # Parse `[n]` tokens from the final answer so the plugin can hide
+            # citation cards the LLM didn't actually use. Retrieval pool can
+            # include weak matches (e.g. vector top-K filling slots when the
+            # query has only one strong hit), and the LLM correctly ignores
+            # them — we shouldn't display them as if they were sources.
+            full = "".join(chunks)
+            used = sorted({int(m) for m in re.findall(r"\[(\d+)\]", full)
+                           if 1 <= int(m) <= len(citations)})
             yield _sse(
                 "done",
                 {
                     "elapsed_seconds": round(time.perf_counter() - started, 2),
-                    "answer_length": sum(len(c) for c in chunks),
+                    "answer_length": len(full),
+                    "used_citation_indices": used,  # 1-indexed, matches [n] in answer
                 },
             )
         except Exception as e:  # noqa: BLE001

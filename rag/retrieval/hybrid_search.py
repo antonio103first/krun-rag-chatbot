@@ -46,6 +46,28 @@ class HybridSearchResult:
 ENUMERATE_LIMIT = 200
 
 
+def _safe_str(v) -> str:
+    """NaN-safe stringification. pandas leaks float('nan') for missing string
+    columns, and NaN is truthy, so `r.get(k) or ""` doesn't catch it — but
+    comparing NaN to a real str during sort raises TypeError."""
+    if v is None:
+        return ""
+    if isinstance(v, float) and v != v:  # NaN check
+        return ""
+    return str(v)
+
+
+def _safe_int(v) -> int:
+    if v is None:
+        return 0
+    if isinstance(v, float) and v != v:
+        return 0
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return 0
+
+
 def enumerate_search(
     *,
     where: str,
@@ -68,12 +90,12 @@ def enumerate_search(
     head_where = f"({where}) AND chunk_idx = 0"
     rows = store.search_by_filter(head_where, limit=limit * 4)
     if rows:
-        rows.sort(key=lambda r: (r.get("date") or "", r.get("file_path") or ""))
+        rows.sort(key=lambda r: (_safe_str(r.get("date")), _safe_str(r.get("file_path"))))
         # Dedupe defensively in case a file has multiple chunk_idx=0 rows.
         seen: set[str] = set()
         out: list[dict] = []
         for r in rows:
-            fp = r.get("file_path") or ""
+            fp = _safe_str(r.get("file_path"))
             if fp in seen:
                 continue
             seen.add(fp)
@@ -84,11 +106,11 @@ def enumerate_search(
 
     # Fallback: pull a very wide pool and dedupe manually.
     rows = store.search_by_filter(where, limit=10000)
-    rows.sort(key=lambda r: (r.get("date") or "", r.get("file_path") or "", r.get("chunk_idx") or 0))
+    rows.sort(key=lambda r: (_safe_str(r.get("date")), _safe_str(r.get("file_path")), _safe_int(r.get("chunk_idx"))))
     seen2: set[str] = set()
     out2: list[dict] = []
     for r in rows:
-        fp = r.get("file_path") or ""
+        fp = _safe_str(r.get("file_path"))
         if fp in seen2:
             continue
         seen2.add(fp)
@@ -231,21 +253,20 @@ def hybrid_search(
     if (
         analysis is not None
         and getattr(analysis, "intent", "lookup") == "enumerate"
-        and (where or analysis.doc_types)
+        and where  # require a structural narrowing (date/company/person);
+        # doc_types-only enumeration is too broad and dumps random head chunks
+        # for content-conditional queries like "남부권에 해당하는 회사 리스트".
     ):
         # In enumerate mode we DO honor doc_type from the analyzer (unlike the
         # default hybrid path), because narrowing to e.g. only meeting notes is
         # exactly what gives a clean enumerable list. When there's no other
         # WHERE filter (e.g. "Antonio가 투자한 업체들 모두" → just doc_types=
         # ["company"]), the doc_type clause alone carries the enumeration.
-        if where and analysis.doc_types:
+        if analysis.doc_types:
             joined = ", ".join(f"'{_q(t)}'" for t in analysis.doc_types)
             enum_where = f"({where}) AND doc_type IN ({joined})"
-        elif where:
+        else:
             enum_where = where
-        else:  # doc_types only
-            joined = ", ".join(f"'{_q(t)}'" for t in analysis.doc_types)
-            enum_where = f"doc_type IN ({joined})"
         rows = enumerate_search(where=enum_where, store=store, limit=ENUMERATE_LIMIT)
         return HybridSearchResult(
             rows=rows,
@@ -279,10 +300,22 @@ def hybrid_search(
 
     # 4. Fuse
     if not bm25_ids and not vector_ids:
-        return HybridSearchResult(
-            rows=[], where_clause=where,
-            bm25_hit_count=0, vector_hit_count=0, fused_count=0,
-        )
+        # Empty-result fallback: when WHERE was non-trivial, retry without it.
+        # Common cause: analyzer extracts a name into `companies` / `persons`
+        # that doesn't match any structured metadata (e.g. "로텀 관련한 내용" →
+        # companies=['로텀'], but 로텀 is only mentioned inside a person meeting
+        # note where the chunk's `company` field is NULL). BM25/vector without
+        # the filter usually find the right chunk by content.
+        if where:
+            bm25_ids = [cid for cid, _ in bm25.search(rewritten, top_k=cfg.bm25_top_k)]
+            vector_rows = store.vector_search(qvec, limit=cfg.vector_top_k, where=None)
+            vector_ids = [r["chunk_id"] for r in vector_rows]
+            where = None  # downstream steps (augmentation, etc.) skip filter
+        if not bm25_ids and not vector_ids:
+            return HybridSearchResult(
+                rows=[], where_clause=where,
+                bm25_hit_count=0, vector_hit_count=0, fused_count=0,
+            )
 
     # We always fuse to a larger pool than `final_top_k` so that diversification
     # and (optional) reranking have headroom. When the reranker is on, this

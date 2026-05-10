@@ -4,7 +4,7 @@
 
 ---
 
-## 🟢 Current Status (last updated: 2026-05-02 — end of Phase 2 session)
+## 🟢 Current Status (last updated: 2026-05-02 — Phase 2 session +1, post field-test bug fixes)
 
 | Phase | Status | Notes |
 |---|---|---|
@@ -114,6 +114,38 @@ When the user starts a new session, do this in order:
 - `투자팀회의_20260420.md` frontmatter `date: 2026-04-19` — filename says 0420.
 - VC협회 조찬세미나, 스케일업 팁스 장관간담회 each have **two** notes per event (one with date suffix, one without) — frontmatter `date` differs between them. User likely wants to dedupe.
 - 4월 47개 파일 중 골프 3건·티타임 1건·석식 1건은 비즈니스 미팅 아님 → category 분리됨 (의도). 사용자가 "미팅"에서 빼고 싶다면 enumerate 시 `category != 골프 AND category != 식사·친교` 옵션 추가 가능.
+
+---
+
+## 🆕 Field-test fixes (2026-05-02, post-plugin-deploy)
+
+User started using the plugin in real work and hit two issues on a single query: **"전체 노트에서 7호조합 주목적중 남부권에 해당하는 검토업체 리스트 정리"**.
+
+### Bug 1: enumerate sort crash on NaN dates
+- **Symptom**: `TypeError: '<' not supported between instances of 'float' and 'str'` in `enumerate_search` sort key.
+- **Cause**: pandas leaks `float('nan')` for missing string columns. NaN is truthy in Python, so `r.get("date") or ""` doesn't catch it; the sort then compared NaN (float) to "" (str) and raised.
+- **Fix**: added `_safe_str()` / `_safe_int()` NaN-safe helpers in `hybrid_search.py` and used them for all enumerate-mode sort/dedupe keys. Same pattern as the `--refresh-metadata` fix (commit `64b9de6`); generalize this when touching pandas-derived dicts.
+
+### Bug 2: enumerate misroutes content-conditional listings
+- **Symptom**: query returned a generic dump of `project` + `company` head chunks. Actual answer was in meeting notes (예비검토보고서, 1차DD, IR), which were excluded.
+- **Cause #1**: analyzer classified `intent=enumerate` because of "리스트" + "전체 노트" keywords, even though the listing predicate ("남부권에 해당") is a **semantic content condition**, not a structural metadata filter. enumerate then bypassed BM25/vector entirely.
+- **Cause #2**: analyzer emitted `doc_types=['project','company']` with `companies=[]` and no date — so the WHERE clause was `None`. The previous behavior (commit `7b96cd6`) was to fire enumerate from doc_types-only when no other filter is set; that's fine for "Antonio가 투자한 업체들 모두" but breaks for content-conditional queries.
+- **Fix A** (`hybrid_search.py`): enumerate now requires a non-None `where` (i.e., date_range / companies / persons must narrow the set). doc_types-only enumeration falls back to hybrid. Simplification: removed the doc_types-only branch in enum_where construction.
+- **Fix B** (`query_analyzer.py` SYSTEM_PROMPT): added a Rules clause that **content-conditional listings stay in lookup** — when the predicate is geography ("남부권/수도권"), sector ("소부장/바이오"), fund-purpose ("주목적/주요투자분야"), or qualitative judgment, use `intent="lookup"`. Added two new examples ("7호조합 주목적중 남부권 검토업체", "소부장 분야 검토 회사").
+
+### Decisions made
+| Decision | Rationale |
+|---|---|
+| enumerate requires a structural WHERE (not just doc_types) | doc_types alone is too broad. "전체 회사 리스트" by metadata is rarely what the user wants — they almost always have a content predicate in mind. Force those queries to use semantic search. |
+| Two-pronged fix (analyzer prompt + retrieval guardrail) | Belt-and-suspenders. The analyzer should ideally route correctly, but if it slips up on edge cases, the retrieval-side guardrail still produces a reasonable answer instead of a metadata dump. |
+| NaN-safe helpers as named functions, not inlined | Will recur. Anywhere we sort/compare values from pandas-derived dicts (LanceDB → pandas → dict), wrap with `_safe_str` / `_safe_int`. Future refactor: store-level cleanup so dict consumers never see NaN. |
+
+### Verified working
+After both fixes + server restart, the same query routed to `intent=lookup`, BM25/vector returned the right notes (시너지_예비검토보고서, 블루타일랩_예비검토보고서, 7호.md, 정기조합원총회 등), and the LLM answered with the expected southern-region candidates.
+
+### Files touched this session
+- `rag/retrieval/hybrid_search.py` — `_safe_str` / `_safe_int` helpers; enumerate trigger requires `where`
+- `rag/retrieval/query_analyzer.py` — content-conditional rule + 2 new example Q/A pairs
 
 ---
 
