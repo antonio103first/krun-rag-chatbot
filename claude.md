@@ -42,19 +42,37 @@ Two things that actually move the needle:
 - `detect_vault_changes` handles deletes correctly, so incremental is non-destructive;
   a `--full` re-embed is never needed for catch-up.
 
-### Known vault data issues (found 2026-07-19, not yet fixed)
+### Known vault data issues
 
-- **3 files have unparseable frontmatter** — the body is indexed but ALL metadata is
-  lost, so they can never match a `company` / date filter (i.e. they are invisible to
-  company_brief and enumerate):
-  `03_Companies/Antonio/검토중/지엘켐/지엘켐.md` (ScannerError: unquoted alias char),
-  `04_Meetings/행사/국토부 운용위/국토부 운용위.md` and
-  `04_Meetings/행사/바이오SPC 기획위원회/바이오SPC 기획위원회.md` (both
-  ConstructorError: unhashable key — a `[[wikilink]]` sitting in a YAML key position).
-- **`meeting_krun` (6 notes) and `meeting_antonio` (4 notes) appear as company names**
-  in `/companies` — template placeholders leaking into the `company` frontmatter field,
-  same class of bug as the `company: [[meeting]]` case `scripts/audit_frontmatter.py`
-  already fixes.
+**Fixed 2026-07-19** — 3 files whose frontmatter failed to parse. The body was indexed
+but ALL metadata was lost, so they could never match a `company` / date filter, making
+them invisible to company_brief and enumerate. Two distinct causes worth recognizing:
+
+- `지엘켐.md` — `business_model: **① 이차전지…` — YAML reads a leading `*` as an alias
+  reference (ScannerError). Fix: quote the value.
+- `국토부 운용위.md`, `바이오SPC 기획위원회.md` — unrendered Templater placeholders
+  (`created: {{DATE:YYYY-MM-DD}}`). YAML parses `{…}` as a flow mapping, making the key
+  a dict (ConstructorError: unhashable key). Fix: fill the value or drop the
+  placeholder. Both were empty index notes; real content lives in dated siblings, so
+  `date` was left blank rather than invented.
+
+**Also fixed 2026-07-19** — 지엘켐 was scattered across four locations with a typo'd
+duplicate folder (`지엘캠`, ㅐ vs ㅔ) under `KRUN/검토중`. Consolidated into
+`03_Companies/KRUN/검토중/지엘켐/` (4 notes), `review_scope` corrected to `krun`, and
+`지엘캠 / GL Chem / glchem` registered in `config/aliases.yaml`. Junk moved to
+`.trash/지엘켐_정리_<ts>/`, not hard-deleted. The `_dup_` 예비검토보고서 was verified
+byte-identical after whitespace normalization (same md5) before being moved.
+The 주간회의 STT transcript still says 지엘캠 — left alone deliberately (transcripts are
+a record of what was said, and `08_회의록/` is excluded from indexing anyway).
+
+**Still open:**
+
+- **12 polluted `company` values** show up in `/companies` as if they were companies:
+  `meeting_krun` (6 notes), `meeting_antonio` (4), `inbound_2026MMDD` (9 separate
+  dates), `파트너회의_20260503`. Two distinct leaks — template placeholders and
+  filenames landing in the `company` field. Root cause is upstream in whatever
+  automation writes that frontmatter; fixing the notes alone will not stop it.
+  `scripts/audit_frontmatter.py` already handles the related `company: [[meeting]]` case.
 - **7 body-less stub notes** (36–64 bytes, frontmatter only) produce zero chunks, so
   they never get an `ingested_at` and permanently show up in the catch-up backlog.
   Harmless, but the backlog never reads as truly empty.

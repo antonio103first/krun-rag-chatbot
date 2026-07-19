@@ -31,12 +31,33 @@ from rag.ingest.pipeline import detect_vault_changes, index_files
 from rag.store.lancedb_store import open_store
 
 
-def _pending(settings, store, only: str | None) -> list[Path]:
+def _pending(settings, store, only: str | None) -> tuple[list[Path], list[str]]:
+    """(files to index, file paths to drop) — deletions included deliberately.
+
+    A note that was moved or renamed shows up as new-at-the-new-path AND
+    deleted-at-the-old-path. Indexing only the former leaves the old rows in
+    the table, so the stale copy keeps surfacing in search. `index_incremental`
+    handles this; an earlier version of this script did not, and the 지엘켐
+    folder reorganization left 8 orphaned entries behind.
+    """
     diff = detect_vault_changes(settings=settings, store=store)
     targets = diff.new + diff.changed
+    stale = [str(p) for p in diff.deleted]
     if only:
         targets = [p for p in targets if only in str(p)]
-    return targets
+        stale = [p for p in stale if only in p]
+    return targets, stale
+
+
+def _drop_stale(store, stale: list[str]) -> int:
+    dropped = 0
+    for fp in stale:
+        try:
+            store.delete_by_file(fp)
+            dropped += 1
+        except Exception as e:
+            print(f"  [delete fail] {fp}: {e!r}")
+    return dropped
 
 
 def main() -> int:
@@ -63,9 +84,18 @@ def main() -> int:
     settings = get_settings()
     store = open_store()
 
-    targets = _pending(settings, store, args.only)
-    print(f"backlog: {len(targets)} files   (store has {store.count()} chunks)")
-    if args.dry_run or not targets:
+    targets, stale = _pending(settings, store, args.only)
+    print(
+        f"backlog: {len(targets)} files, {len(stale)} stale to drop   "
+        f"(store has {store.count()} chunks)"
+    )
+    if args.dry_run:
+        return 0
+
+    # Drop first: a moved note's old rows must go even if there is nothing to index.
+    if stale:
+        print(f"dropping {_drop_stale(store, stale)} stale files -> {store.count()} chunks")
+    if not targets:
         return 0
 
     # One embedder across all batches — reloading BGE-M3 per batch costs ~10s each.
