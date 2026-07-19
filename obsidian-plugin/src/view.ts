@@ -52,15 +52,23 @@ export class KrunRagView extends ItemView {
     header.createEl("strong", { text: "KRUN RAG" });
     this.statusEl = header.createSpan({ cls: "krun-rag-status", text: "checking…" });
 
-    // Toolbar
+    // Primary actions — the two things that aren't "type a question".
+    const actions = root.createDiv({ cls: "krun-rag-actions" });
+    const briefBtn = actions.createEl("button", { text: "🏢 회사 브리핑", cls: "mod-cta" });
+    briefBtn.onclick = () => this.plugin.openCompanyPicker(this);
+
+    const noteBtn = actions.createEl("button", { text: "📄 현재 노트" });
+    noteBtn.onclick = () => this.askAboutCurrentNote();
+
+    // Housekeeping — deliberately smaller and below the primary row.
     const toolbar = root.createDiv({ cls: "krun-rag-toolbar" });
-    const refreshBtn = toolbar.createEl("button", { text: "Health" });
+    const refreshBtn = toolbar.createEl("button", { text: "상태" });
     refreshBtn.onclick = () => this.refreshHealth();
 
-    const reindexBtn = toolbar.createEl("button", { text: "Reindex (incremental)" });
+    const reindexBtn = toolbar.createEl("button", { text: "재색인" });
     reindexBtn.onclick = () => this.runReindex();
 
-    const clearBtn = toolbar.createEl("button", { text: "Clear" });
+    const clearBtn = toolbar.createEl("button", { text: "대화 지우기" });
     clearBtn.onclick = () => this.clearConversation();
 
     // Active note
@@ -70,7 +78,12 @@ export class KrunRagView extends ItemView {
 
     // Conversation
     this.convoEl = root.createDiv({ cls: "krun-rag-conversation" });
-    this.convoEl.createDiv({ cls: "krun-rag-empty", text: "질문을 입력하세요. 출처를 클릭하면 노트로 이동합니다." });
+    this.convoEl.createDiv({
+      cls: "krun-rag-empty",
+      text:
+        "질문을 입력하고 Ctrl+Enter. 미팅 전이라면 위 「회사 브리핑」을 누르세요. " +
+        "답변의 [1] 같은 번호를 클릭하면 근거 노트가 열립니다.",
+    });
 
     // Input
     const inputBox = root.createDiv({ cls: "krun-rag-input" });
@@ -97,8 +110,24 @@ export class KrunRagView extends ItemView {
     this.cancel();
   }
 
-  /** Public: triggered by commands (palette / "ask about current note"). */
+  /** Ask about whatever note is open. No-op with a nudge when none is. */
+  private askAboutCurrentNote(): void {
+    const f = this.app.workspace.getActiveFile();
+    if (!f) {
+      new Notice("열려 있는 노트가 없습니다.");
+      return;
+    }
+    this.run(`[[${f.basename}]]에 대해 알려줘 — 핵심 요약과 다음에 챙길 점은?`, {});
+  }
+
+  /** Public: triggered by the palette command.
+   *
+   * Guarded: a caller can reach us before onOpen() has built the DOM (deferred
+   * leaves resolve asynchronously), and an unguarded throw here is swallowed by
+   * the caller's promise chain — which reads to the user as "nothing happened".
+   */
   focusAndPrefill(text: string): void {
+    if (!this.inputEl) return;
     this.inputEl.value = text;
     this.inputEl.focus();
     this.inputEl.setSelectionRange(this.inputEl.value.length, this.inputEl.value.length);

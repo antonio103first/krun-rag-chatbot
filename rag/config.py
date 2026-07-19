@@ -103,8 +103,19 @@ class RetrievalConfig(BaseModel):
 
 
 class GenerationConfig(BaseModel):
+    # "gemini" is the default: this is a single-operator tool and the Anthropic
+    # bill is per-token, so the free tier is what keeps it running day to day.
+    # Switch to "anthropic" when answer quality matters more than cost.
+    provider: Literal["gemini", "anthropic"] = "gemini"
     gen_model: str = "claude-sonnet-4-6"
     analyzer_model: str = "claude-haiku-4-5"
+    gemini_model: str = "gemini-2.5-flash"
+    gemini_analyzer_model: str = "gemini-2.5-flash"
+    # Where to look for GEMINI_API_KEY when it isn't in this project's .env —
+    # the vault automation has maintained the key since 2026-06.
+    gemini_env_fallback: str = (
+        r"C:\Users\anton\Documents\Obsidian_KRUN_Antonio\_automation\.env"
+    )
     max_tokens: int = 2048
     temperature: float = 0.2
     stream: bool = True
@@ -136,7 +147,9 @@ class Settings(BaseSettings):
 
     # Secrets / overrides via env
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
+    gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
     zdr_enabled_env: bool = Field(default=False, alias="ZDR_ENABLED")
+    rag_provider_env: str | None = Field(default=None, alias="RAG_PROVIDER")
     vault_path_env: str | None = Field(default=None, alias="VAULT_PATH")
     lancedb_path_env: str | None = Field(default=None, alias="LANCEDB_PATH")
     log_level_env: str | None = Field(default=None, alias="LOG_LEVEL")
@@ -194,6 +207,8 @@ class Settings(BaseSettings):
             settings.generation.gen_model = settings.claude_gen_model_env
         if settings.claude_analyzer_model_env:
             settings.generation.analyzer_model = settings.claude_analyzer_model_env
+        if settings.rag_provider_env in ("gemini", "anthropic"):
+            settings.generation.provider = settings.rag_provider_env
 
         return settings
 

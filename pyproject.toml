@@ -16,7 +16,10 @@ dependencies = [
     "torch>=2.4",
 
     # --- LLM ---
+    # Both providers ship by default: generation.provider picks one at runtime,
+    # and falling back between them shouldn't require a dependency change.
     "anthropic>=0.40",
+    "google-genai>=1.0",
 
     # --- Retrieval ---
     "rank-bm25>=0.2.2",

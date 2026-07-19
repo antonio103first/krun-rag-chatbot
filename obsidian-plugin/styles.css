@@ -29,6 +29,20 @@
   color: var(--color-red);
 }
 
+/* Primary actions sit above the housekeeping toolbar and are deliberately
+   bigger — these are the two things a user reaches for daily. */
+.krun-rag-actions {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.krun-rag-actions button {
+  flex: 1;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
 .krun-rag-toolbar {
   display: flex;
   gap: 4px;

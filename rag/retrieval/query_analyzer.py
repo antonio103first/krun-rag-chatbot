@@ -107,6 +107,9 @@ class QueryAnalysis:
     date_to: str | None = None
     used_fallback: bool = False
     latency_ms: int = 0
+    # Set when the analyzer call itself failed (dead key, quota, network).
+    # Distinguishes "no filters were needed" from "we never got to ask".
+    error: str | None = None
 
     def is_empty_filter(self) -> bool:
         return not (
@@ -139,13 +142,68 @@ def _fallback(query: str) -> QueryAnalysis:
     return QueryAnalysis(raw=query, rewritten_query=query, used_fallback=True)
 
 
+def _analyze_anthropic(prompt: str, client: Anthropic | None) -> str:
+    s = get_settings()
+    client = client or Anthropic(api_key=s.anthropic_api_key)
+    extra_headers: dict[str, str] = {}
+    if s.generation.zdr_enabled:
+        extra_headers["anthropic-zero-retention-window"] = "0"
+    msg = client.messages.create(
+        model=s.generation.analyzer_model,
+        max_tokens=400,
+        temperature=0.0,
+        system=[
+            {
+                "type": "text",
+                "text": SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+        messages=[{"role": "user", "content": prompt}],
+        extra_headers=extra_headers or None,
+    )
+    return msg.content[0].text if msg.content else ""
+
+
+def _analyze_gemini(prompt: str) -> str:
+    """Same prompt, Gemini backend. JSON mode keeps `_strip_to_json` honest."""
+    from google import genai
+
+    from rag.generation.gemini_client import GeminiUnavailable, resolve_gemini_key
+
+    s = get_settings()
+    key = resolve_gemini_key(s)
+    if not key:
+        raise GeminiUnavailable("GEMINI_API_KEY 없음 (질의 분석기)")
+    client = genai.Client(api_key=key)
+    resp = client.models.generate_content(
+        model=s.generation.gemini_analyzer_model,
+        contents=prompt,
+        config=genai.types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            temperature=0.0,
+            max_output_tokens=400,
+            response_mime_type="application/json",
+            thinking_config=genai.types.ThinkingConfig(thinking_budget=0),
+        ),
+    )
+    return resp.text or ""
+
+
 def analyze_query(
     query: str,
     *,
     client: Anthropic | None = None,
     today: date | None = None,
 ) -> QueryAnalysis:
-    """Call Haiku to analyze the query. Returns a fallback on any error."""
+    """Extract structured filters from the query.
+
+    Returns a fallback analysis on any error — retrieval still works without
+    filters, just less precisely. The error is logged rather than swallowed:
+    a dead API key used to degrade every search silently, with the only
+    symptom being worse answers.
+    """
+    import logging
     import time
 
     s = get_settings()
@@ -153,39 +211,25 @@ def analyze_query(
         return _fallback(query)
 
     today = today or date.today()
-    client = client or Anthropic(api_key=s.anthropic_api_key)
-
-    extra_headers: dict[str, str] = {}
-    if s.generation.zdr_enabled:
-        extra_headers["anthropic-zero-retention-window"] = "0"
+    prompt = f"today={today.isoformat()}\nQ: {query}\nA:"
 
     started = time.perf_counter()
     try:
-        msg = client.messages.create(
-            model=s.generation.analyzer_model,
-            max_tokens=400,
-            temperature=0.0,
-            system=[
-                {
-                    "type": "text",
-                    "text": SYSTEM_PROMPT,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"today={today.isoformat()}\nQ: {query}\nA:",
-                }
-            ],
-            extra_headers=extra_headers or None,
+        if s.generation.provider == "gemini":
+            text = _analyze_gemini(prompt)
+        else:
+            text = _analyze_anthropic(prompt, client)
+    except Exception as e:
+        logging.getLogger(__name__).warning(
+            "query analyzer unavailable (%s: %s) — falling back to unfiltered search",
+            type(e).__name__,
+            e,
         )
-    except Exception:
-        return _fallback(query)
+        out = _fallback(query)
+        out.error = f"{type(e).__name__}: {e}"
+        return out
 
     elapsed_ms = int((time.perf_counter() - started) * 1000)
-
-    text = msg.content[0].text if msg.content else ""
     payload = _strip_to_json(text)
     try:
         data = json.loads(payload)

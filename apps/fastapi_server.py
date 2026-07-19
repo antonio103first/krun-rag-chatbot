@@ -30,7 +30,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from rag.config import get_settings
-from rag.generation.claude_client import ClaudeClient
+from rag.generation.factory import GenerationClient, active_model_name, build_client
 from rag.generation.prompts import SYSTEM_PROMPT_KO, build_user_message
 from rag.retrieval.citations import Citation, build_citations
 from rag.retrieval.hybrid_search import company_brief_search, hybrid_search
@@ -66,10 +66,10 @@ def _get_store_and_bm25():
     return _state["store"], _state["bm25"]
 
 
-def _get_client() -> ClaudeClient:
+def _get_client() -> GenerationClient:
     with _lock:
         if _state["client"] is None:
-            _state["client"] = ClaudeClient()
+            _state["client"] = build_client()
     return _state["client"]
 
 
@@ -221,6 +221,38 @@ def _max_tokens_for(mode: str) -> int | None:
     return COMPANY_BRIEF_MAX_TOKENS if mode == "company_brief" else None
 
 
+def _friendly_error(e: Exception) -> str:
+    """Turn a provider exception into a message that names the fix.
+
+    The raw text is always appended — a bare "오류: 400" sent the last debugging
+    session hunting through server logs for what turned out to be an exhausted
+    credit balance. Whatever we fail to classify still reaches the user intact.
+    """
+    raw = str(e)
+    low = raw.lower()
+    hint = ""
+
+    if "credit balance is too low" in low or "insufficient" in low:
+        hint = (
+            "Anthropic API 크레딧이 소진됐습니다. "
+            "console.anthropic.com 에서 충전하거나, config.yaml 의 "
+            "`generation.provider` 를 `gemini`(무료)로 바꾸세요."
+        )
+    elif "quota" in low or "resource_exhausted" in low or "429" in low:
+        hint = "무료 사용량 한도에 걸렸습니다. 잠시 후 다시 시도하세요."
+    elif "api key" in low or "unauthenticated" in low or "401" in low or "403" in low:
+        hint = (
+            "API 키가 없거나 잘못됐습니다. .env 의 GEMINI_API_KEY / "
+            "ANTHROPIC_API_KEY 를 확인하세요."
+        )
+    elif "GeminiUnavailable" in type(e).__name__:
+        hint = raw  # already actionable Korean
+    elif isinstance(e, (ConnectionError, TimeoutError)) or "timeout" in low:
+        hint = "네트워크 연결에 실패했습니다. 인터넷 상태를 확인하세요."
+
+    return f"{hint}\n\n(원문: {raw})" if hint else raw
+
+
 def _sse(event: str, data: Any) -> str:
     payload = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False, default=str)
     return f"event: {event}\ndata: {payload}\n\n"
@@ -240,8 +272,13 @@ def health() -> dict:
         "rows": rows,
         "vault": str(settings.vault.resolved_path),
         "vault_name": settings.vault.resolved_path.name,
-        "gen_model": settings.generation.gen_model,
-        "analyzer_model": settings.generation.analyzer_model,
+        "provider": settings.generation.provider,
+        "gen_model": active_model_name(),
+        "analyzer_model": (
+            settings.generation.gemini_analyzer_model
+            if settings.generation.provider == "gemini"
+            else settings.generation.analyzer_model
+        ),
         "zdr_enabled": settings.generation.zdr_enabled,
         "reindex_running": _state["reindex_running"],
     }
@@ -305,7 +342,7 @@ def ask_stream(req: AskRequest):
             )
         except Exception as e:  # noqa: BLE001
             log.exception("ask_stream error")
-            yield _sse("error", {"message": str(e)})
+            yield _sse("error", {"message": _friendly_error(e)})
 
     return StreamingResponse(
         gen(),
@@ -337,11 +374,15 @@ def ask_json(req: AskRequest) -> AskJsonResponse:
 
     client = _get_client()
     mode = getattr(result, "mode", "lookup")
-    gen = client.stream(
-        SYSTEM_PROMPT_KO,
-        build_user_message(req.query, citations, mode=mode),
-        max_tokens=_max_tokens_for(mode),
-    )
+    try:
+        gen = client.stream(
+            SYSTEM_PROMPT_KO,
+            build_user_message(req.query, citations, mode=mode),
+            max_tokens=_max_tokens_for(mode),
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception("ask_json generation error")
+        raise HTTPException(502, _friendly_error(e)) from e
     return AskJsonResponse(
         query=req.query,
         analysis=analysis.__dict__,
