@@ -1,5 +1,5 @@
 import { ItemView, MarkdownRenderer, Notice, TFile, WorkspaceLeaf } from "obsidian";
-import { CitationOut, KrunRagApi } from "./api";
+import { AskRequest, CitationOut, KrunRagApi } from "./api";
 import type KrunRagPlugin from "./main";
 
 export const KRUN_RAG_VIEW_TYPE = "krun-rag-view";
@@ -160,17 +160,30 @@ export class KrunRagView extends ItemView {
   private submit(): void {
     const q = this.inputEl.value.trim();
     if (!q) return;
+    this.inputEl.value = "";
+    this.run(q, {});
+  }
+
+  /** Public: pre-meeting briefing for one company (command palette).
+   *
+   * Sends `mode: "company_brief"` so the server skips the analyzer — a bare
+   * company name would otherwise yield no filter at all.
+   */
+  runCompanyBrief(company: string): void {
+    this.run(`${company} — 미팅 전 브리핑`, { mode: "company_brief", company });
+  }
+
+  private run(question: string, extra: Partial<AskRequest>): void {
     if (this.currentAbort) {
       new Notice("이전 요청이 진행 중입니다.");
       return;
     }
-    this.inputEl.value = "";
 
     // Strip empty placeholder if present
     const empty = this.convoEl.querySelector(".krun-rag-empty");
     if (empty) empty.remove();
 
-    const turn = this.appendTurn(q);
+    const turn = this.appendTurn(question);
     const activeFile = this.app.workspace.getActiveFile();
     const activeNote = this.plugin.settings.sendActiveNote && activeFile ? activeFile.path : null;
 
@@ -178,12 +191,13 @@ export class KrunRagView extends ItemView {
     this.askBtn.setText("Streaming…");
     this.currentAbort = this.api.ask(
       {
-        query: q,
+        query: question,
         top_k: this.plugin.settings.topK,
         no_analyze: this.plugin.settings.noAnalyze,
         reranker: this.plugin.settings.rerankerEnabled,
         max_chunks_per_file: this.plugin.settings.maxChunksPerFile,
         active_note: activeNote,
+        ...extra,
       },
       {
         onAnalysis: (a) => {

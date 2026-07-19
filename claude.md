@@ -4,7 +4,58 @@
 
 ---
 
-## 🟢 Current Status (last updated: 2026-05-02 — Phase 2 session +1, post field-test bug fixes)
+## 🟢 Current Status (last updated: 2026-07-19 — company_brief mode shipped)
+
+> ⚠️ **READ FIRST — the index is stale.** LanceDB was last ingested **2026-05-02**
+> (2,826 chunks / 280 files). As of 2026-07-19 the vault has **700 new + 156 changed**
+> files that are NOT indexed: all of 01_Daily since July, 00_Inbox, and the
+> reorganized company folders (`03_Companies/Antonio/검토단계/` became
+> `Inbound deal / 검토중 / 검토종료 / 투자업체`). `/companies` returns only 9 companies,
+> so most retrieval will silently miss recent work. **Run the catch-up ingest before
+> trusting any answer** — see "Reindex cost" below.
+
+### Reindex cost (measured 2026-07-19 — do not re-estimate from the old 25-min figure)
+
+`--incremental` for the current backlog is **856 files → 11,438 chunks → ~11 hours** on
+this machine (16 CPU threads, no CUDA). Measured throughput: **~110s per batch of 32**.
+A synthetic batch of 32 × 900-char Korean chunks takes 37s, so this is BGE-M3 being
+genuinely slow on CPU, not a chunking bug — chunk sizes are bounded (p50 110 chars,
+max 1,743). The "25 min for 4,487 chunks" figure elsewhere in this doc does not
+reproduce; treat it as stale.
+
+Practical guidance:
+- Run the catch-up **overnight** (`uv run python -m rag.ingest.pipeline --incremental`).
+- **Do not run the API server during ingest** — both hold large models and contend for CPU.
+- `--paths` a subfolder to unblock a specific task (e.g. 03_Companies alone is
+  164 files / 3,087 chunks / ~3h).
+- `detect_vault_changes` handles deletes correctly (currently reports 0 deleted), so
+  incremental is safe and non-destructive; a `--full` re-embed is NOT needed.
+
+### company_brief mode (2026-07-19) — ✅ validated end-to-end
+
+Pre-meeting context restore for a single company. Bypasses the analyzer entirely
+(a bare company name makes the analyzer return `companies=[]` by its bare-mention rule).
+
+- `POST /ask` · `/ask/json` with `{"mode": "company_brief", "company": "…"}`
+- `GET /companies` — company names in the index with note counts, powers the picker
+- `company_brief_search()` — two stages: (A) `enumerate_search` fixes the complete
+  file list, one head chunk per note, date-asc; (B) re-fetch **all** chunks of the
+  5 most recent notes, spending a 90K-char budget newest-first. A note that doesn't
+  fit degrades to its head chunk rather than disappearing.
+- `build_user_message(mode="company_brief")` — 4 sections: 제목/현재단계 · 경위(시간순
+  전체) · 핵심(2~3문단) · 이번 미팅 전 확인(미해결 요청사항).
+- Plugin: command `회사 브리핑 (미팅 전 맥락 복원)` → `CompanyPickerModal`, pre-filtered
+  by the active file's company folder.
+
+**Verified 2026-07-19** against 로드원오원 (3 notes / 72 chunks, 34s, 18.9K input tokens):
+correct 4-section output with real financial + legal detail pulled from full text, and
+4 genuinely unresolved items surfaced. Failure paths also checked — unknown company
+returns a fix-it message naming `config/aliases.yaml`; missing `company` returns 400.
+
+<details><summary>Previous status header (2026-05-02)</summary>
+
+## Phase table (last updated: 2026-05-02 — Phase 2 session +1, post field-test bug fixes)
+
 
 | Phase | Status | Notes |
 |---|---|---|
@@ -24,6 +75,12 @@
 | **Category classification** | ✅ DONE | Citations get `category` field via path/filename heuristics: 회사미팅 / 인물미팅 / 사내회의 / 행사 / 통화 / 식사·친교 / 골프 / 기타. Enumerate prompt groups output by category with emoji headers. |
 
 **LanceDB state at session end:** 4,487 chunks. BM25 sidecar at `data/lancedb/bm25_index.pkl`. Run `uv run python -m rag.ingest.pipeline --refresh-metadata` if metadata logic changes; `--incremental` for new/changed files; `--full` only when re-embedding from scratch (~25 min CPU).
+
+> Superseded: the store held 2,826 chunks as of 2026-07-19 and the ~25 min figure did
+> not reproduce. See the Reindex cost section at the top.
+
+</details>
+
 
 **Working directory on Antonio's machine:** `C:\Users\anton\Documents\Claude AI_Personal\krun-rag-chatbot` (Windows native — no WSL).
 

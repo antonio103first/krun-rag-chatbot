@@ -9,6 +9,7 @@ export interface CitationOut {
   header_path: string;
   obsidian_uri: string;
   doc_type: string;
+  category?: string;
   company: string | null;
   person: string | null;
   date: string | null;
@@ -22,6 +23,14 @@ export interface AskRequest {
   reranker?: boolean | null;
   max_chunks_per_file?: number;
   active_note?: string | null;
+  /** "company_brief" bypasses the analyzer; requires `company`. */
+  mode?: "company_brief" | null;
+  company?: string | null;
+}
+
+export interface CompanyEntry {
+  company: string;
+  notes: number;
 }
 
 export interface AskCallbacks {
@@ -67,6 +76,18 @@ export class KrunRagApi {
       body: JSON.stringify({ mode }),
     });
     if (!r.ok) throw new Error(`reindex failed: ${r.status} ${await r.text()}`);
+  }
+
+  /** Company names present in the index, note-count desc. Empty on failure. */
+  async companies(): Promise<CompanyEntry[]> {
+    try {
+      const r = await fetch(`${this.baseUrl}/companies`, { method: "GET" });
+      if (!r.ok) return [];
+      const d = (await r.json()) as { items?: CompanyEntry[] };
+      return d.items ?? [];
+    } catch {
+      return [];
+    }
   }
 
   /** Ask a question; streams events via callbacks. Returns an AbortController. */

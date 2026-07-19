@@ -37,7 +37,7 @@ class HybridSearchResult:
     diversified: bool = False
     distinct_files: int = 0
     augmented_files: int = 0  # head chunks added via filter-aware breadth augmentation
-    mode: str = "hybrid"  # "hybrid" | "enumerate"
+    mode: str = "hybrid"  # "hybrid" | "enumerate" | "company_brief"
 
 
 # --- Enumerate mode: pure metadata WHERE, one chunk per file --------------
@@ -202,6 +202,114 @@ def build_where_clause(analysis: QueryAnalysis | None) -> str | None:
     # word 시너지 reads as "synergy"). The resulting narrow WHERE drops the
     # actual answer files. enumerate mode does its own doc_type handling.
     return " AND ".join(parts) if parts else None
+
+
+# --- Company brief mode ----------------------------------------------------
+# Pre-meeting context restore for a single company: every note filed under that
+# company (complete list, no semantic ranking) plus the *full* text of the most
+# recent few so the answer can cover risks/conclusions/open items — head chunks
+# alone are usually just the attendee list.
+COMPANY_BRIEF_DEEP_FILES = 5
+# Character budget for the deep-loaded files. Korean runs ~1-1.5 chars/token, so
+# 90K chars is roughly 60-90K tokens — well inside the context window while
+# leaving room for the head chunks of older notes, which are never dropped.
+COMPANY_BRIEF_CHAR_BUDGET = 90_000
+
+
+def build_company_where(company: str) -> str:
+    """`company IN (...)` expanded across the alias table.
+
+    Scope is deliberately metadata-only: notes whose `company` field is set.
+    Passing mentions inside other companies' notes have `company = NULL` and are
+    out of scope by design — the briefing answers "미팅한 이력", not "언급된 곳".
+    No doc_type filter: 예비검토보고서 and other resource-typed notes carry real
+    deal context and would be lost by narrowing to meeting/company.
+    """
+    from rag.aliases import all_variants
+
+    variants = all_variants(company, kind="companies") or [company]
+    joined = ", ".join(f"'{_q(v)}'" for v in dict.fromkeys(variants))
+    return f"company IN ({joined})"
+
+
+def company_brief_search(
+    *,
+    company: str,
+    store: VaultChunkStore | None = None,
+    deep_files: int = COMPANY_BRIEF_DEEP_FILES,
+    char_budget: int = COMPANY_BRIEF_CHAR_BUDGET,
+) -> HybridSearchResult:
+    """Two-stage retrieval: complete file list + deep text for recent notes.
+
+    Stage A (`enumerate_search`) fixes the file list — one head chunk per note,
+    date-ascending, nothing missing. Stage B re-fetches every chunk of the most
+    recent `deep_files` notes. Budget is spent newest-first, but rows come back
+    chronologically so citation numbers read as a timeline.
+    """
+    store = store or open_store()
+    where = build_company_where(company)
+    heads = enumerate_search(where=where, store=store, limit=ENUMERATE_LIMIT)
+    if not heads:
+        return HybridSearchResult(
+            rows=[],
+            where_clause=where,
+            bm25_hit_count=0,
+            vector_hit_count=0,
+            fused_count=0,
+            mode="company_brief",
+        )
+
+    ordered_paths = [_safe_str(r.get("file_path")) for r in heads]  # date-asc
+    head_by_path = {_safe_str(r.get("file_path")): r for r in heads}
+    deep_paths = ordered_paths[-deep_files:] if deep_files > 0 else []
+
+    by_path: dict[str, list[dict]] = {}
+    if deep_paths:
+        joined = ", ".join(f"'{_q(p)}'" for p in deep_paths)
+        full = store.search_by_filter(
+            f"({where}) AND file_path IN ({joined})", limit=5000
+        )
+        for r in full:
+            by_path.setdefault(_safe_str(r.get("file_path")), []).append(r)
+        for chunks in by_path.values():
+            chunks.sort(key=lambda r: _safe_int(r.get("chunk_idx")))
+
+    # Spend the budget newest-first. A file that doesn't fit degrades to its
+    # head chunk rather than disappearing — completeness of the list wins.
+    selected: dict[str, list[dict]] = {}
+    deep_used = 0
+    for path in reversed(ordered_paths):
+        chunks = by_path.get(path)
+        if chunks:
+            cost = sum(len(_safe_str(c.get("text"))) for c in chunks)
+            if deep_used + cost <= char_budget:
+                selected[path] = chunks
+                deep_used += cost
+                continue
+        head = head_by_path.get(path)
+        if head is not None:
+            selected[path] = [head]
+
+    rows: list[dict] = []
+    seen_chunks: set[str] = set()
+    for path in ordered_paths:  # chronological output
+        for c in selected.get(path, []):
+            cid = _safe_str(c.get("chunk_id"))
+            if cid and cid in seen_chunks:
+                continue
+            if cid:
+                seen_chunks.add(cid)
+            rows.append(c)
+
+    return HybridSearchResult(
+        rows=rows,
+        where_clause=where,
+        bm25_hit_count=0,
+        vector_hit_count=0,
+        fused_count=len(rows),
+        distinct_files=len(selected),
+        mode="company_brief",
+    )
 
 
 # --- Reciprocal Rank Fusion ------------------------------------------------

@@ -1,4 +1,6 @@
 import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
+import { KrunRagApi } from "./api";
+import { CompanyPickerModal } from "./company-modal";
 import { DEFAULT_SETTINGS, KrunRagSettings, KrunRagSettingTab } from "./settings";
 import { KRUN_RAG_VIEW_TYPE, KrunRagView } from "./view";
 
@@ -37,6 +39,28 @@ export default class KrunRagPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "company-brief",
+      name: "회사 브리핑 (미팅 전 맥락 복원)",
+      callback: async () => {
+        const view = await this.activateView();
+        if (!view) return;
+        const entries = await new KrunRagApi(this.settings.serverUrl).companies();
+        if (!entries.length) {
+          new Notice("회사 목록을 가져오지 못했습니다. RAG 서버가 실행 중인지 확인하세요.");
+          return;
+        }
+        const modal = new CompanyPickerModal(this.app, entries, (c) => view.runCompanyBrief(c));
+        modal.open();
+        // Pre-filter to the company whose folder the user is currently in.
+        const guess = this.guessCompanyFromActiveFile();
+        if (guess) {
+          modal.inputEl.value = guess;
+          modal.inputEl.dispatchEvent(new Event("input"));
+        }
+      },
+    });
+
+    this.addCommand({
       id: "ask-quick",
       name: "Ask KRUN RAG…",
       callback: () => {
@@ -60,6 +84,19 @@ export default class KrunRagPlugin extends Plugin {
 
   onunload(): void {
     // Obsidian unmounts views automatically; ItemView.onClose aborts in-flight streams.
+  }
+
+  /** Company folder name if the active file lives under 03_Companies/, else null.
+   *
+   * Vault layout is 03_Companies/{Antonio|KRUN}/{단계}/{회사}/{파일}.md, so the
+   * containing folder is the company for both the profile note and its meetings.
+   */
+  private guessCompanyFromActiveFile(): string | null {
+    const f = this.app.workspace.getActiveFile();
+    if (!f) return null;
+    const parts = f.path.split("/");
+    if (parts[0] !== "03_Companies" || parts.length < 3) return null;
+    return parts[parts.length - 2] || null;
   }
 
   async loadSettings(): Promise<void> {

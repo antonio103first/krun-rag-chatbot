@@ -200,6 +200,29 @@ class VaultChunkStore:
             return []
         return sorted(set(df["file_path"].tolist()))
 
+    def distinct_companies(self) -> list[tuple[str, int]]:
+        """[(company, note_count)] over rows with a `company` value set.
+
+        Counts distinct files, not chunks — a company with one long note
+        shouldn't outrank one with five meetings. Powers the briefing picker.
+        """
+        df = self.table.to_pandas()
+        if len(df) == 0 or "company" not in df.columns:
+            return []
+        cols = ["company", "file_path"] if "file_path" in df.columns else ["company"]
+        sub = df[cols].dropna(subset=["company"])
+        sub = sub[sub["company"].astype(str).str.strip() != ""]
+        if len(sub) == 0:
+            return []
+        if "file_path" in sub.columns:
+            counts = sub.groupby("company")["file_path"].nunique()
+        else:
+            counts = sub.groupby("company").size()
+        return sorted(
+            ((str(k), int(v)) for k, v in counts.items()),
+            key=lambda kv: (-kv[1], kv[0]),
+        )
+
     # --- Reads ---------------------------------------------------------
     def search_by_company(self, company: str, limit: int = 10) -> list[dict[str, Any]]:
         """Exact metadata match on the `company` field."""

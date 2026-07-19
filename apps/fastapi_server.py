@@ -33,7 +33,7 @@ from rag.config import get_settings
 from rag.generation.claude_client import ClaudeClient
 from rag.generation.prompts import SYSTEM_PROMPT_KO, build_user_message
 from rag.retrieval.citations import Citation, build_citations
-from rag.retrieval.hybrid_search import hybrid_search
+from rag.retrieval.hybrid_search import company_brief_search, hybrid_search
 from rag.retrieval.query_analyzer import QueryAnalysis, analyze_query
 from rag.store.bm25_index import open_bm25_index
 from rag.store.lancedb_store import open_store
@@ -88,6 +88,10 @@ class AskRequest(BaseModel):
     reranker: bool | None = None  # None = use config default
     max_chunks_per_file: int | None = None
     active_note: str | None = None  # vault-relative path, optional context hint
+    # Explicit retrieval mode. None = let the analyzer decide (hybrid/enumerate).
+    # "company_brief" bypasses the analyzer entirely and requires `company`.
+    mode: str | None = Field(None, pattern="^(company_brief)$")
+    company: str | None = None
 
 
 class CitationOut(BaseModel):
@@ -158,6 +162,53 @@ def _expand_query_with_active_note(req: AskRequest) -> str:
     return f"[현재 노트: {stem}] {req.query}"
 
 
+def _empty_result_message(req: AskRequest) -> str:
+    if req.mode == "company_brief":
+        return (
+            f"'{req.company}' 이름으로 `company` 메타데이터가 설정된 노트가 없습니다. "
+            "회사명 철자를 확인하거나, 사명이 바뀐 경우 `config/aliases.yaml`에 "
+            "별칭을 추가한 뒤 다시 시도하세요."
+        )
+    return "제공된 자료에서 관련 청크를 찾지 못했습니다. 질문을 다시 표현하거나 필터를 완화해보세요."
+
+
+def _analyze_and_retrieve(req: AskRequest, store, bm25):
+    """Resolve (query, analysis, retrieval result) for both /ask and /ask/json.
+
+    company_brief skips the analyzer: the company is already known, and the
+    analyzer's bare-mention rule deliberately returns `companies=[]` for a plain
+    company name, which would produce no WHERE at all.
+    """
+    query = _expand_query_with_active_note(req)
+
+    # company_brief deliberately ignores top_k / max_chunks_per_file: the mode
+    # exists to return the complete history, not a ranked slice.
+    if req.mode == "company_brief":
+        company = (req.company or "").strip()
+        if not company:
+            raise HTTPException(400, "mode=company_brief requires a non-empty `company`")
+        analysis = QueryAnalysis(
+            raw=query,
+            rewritten_query=query,
+            companies=[company],
+            used_fallback=True,
+        )
+        return query, analysis, company_brief_search(company=company, store=store)
+
+    if req.no_analyze:
+        analysis = QueryAnalysis(raw=query, rewritten_query=query, used_fallback=True)
+    else:
+        analysis = analyze_query(query)
+    result = hybrid_search(
+        query=query,
+        analysis=analysis,
+        store=store,
+        bm25=bm25,
+        settings=_build_retrieval_cfg(req),
+    )
+    return query, analysis, result
+
+
 def _sse(event: str, data: Any) -> str:
     payload = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False, default=str)
     return f"event: {event}\ndata: {payload}\n\n"
@@ -195,18 +246,9 @@ def ask_stream(req: AskRequest):
                 yield _sse("error", {"message": "LanceDB is empty. Run an ingest first."})
                 return
 
-            query = _expand_query_with_active_note(req)
-
-            # 1. Analyze
-            if req.no_analyze:
-                analysis = QueryAnalysis(raw=query, rewritten_query=query, used_fallback=True)
-            else:
-                analysis = analyze_query(query)
+            # 1-2. Analyze + retrieve
+            query, analysis, result = _analyze_and_retrieve(req, store, bm25)
             yield _sse("analysis", analysis.__dict__)
-
-            # 2. Retrieve
-            cfg = _build_retrieval_cfg(req)
-            result = hybrid_search(query=query, analysis=analysis, store=store, bm25=bm25, settings=cfg)
             citations = build_citations(result.rows)
             yield _sse(
                 "citations",
@@ -218,10 +260,7 @@ def ask_stream(req: AskRequest):
             )
 
             if not citations:
-                yield _sse(
-                    "delta",
-                    {"text": "제공된 자료에서 관련 청크를 찾지 못했습니다. 질문을 다시 표현하거나 필터를 완화해보세요."},
-                )
+                yield _sse("delta", {"text": _empty_result_message(req)})
                 yield _sse("done", {"elapsed_seconds": round(time.perf_counter() - started, 2)})
                 return
 
@@ -268,14 +307,7 @@ def ask_json(req: AskRequest) -> AskJsonResponse:
     if store.count() == 0:
         raise HTTPException(503, "LanceDB is empty. Run an ingest first.")
 
-    query = _expand_query_with_active_note(req)
-    if req.no_analyze:
-        analysis = QueryAnalysis(raw=query, rewritten_query=query, used_fallback=True)
-    else:
-        analysis = analyze_query(query)
-
-    cfg = _build_retrieval_cfg(req)
-    result = hybrid_search(query=query, analysis=analysis, store=store, bm25=bm25, settings=cfg)
+    query, analysis, result = _analyze_and_retrieve(req, store, bm25)
     citations = build_citations(result.rows)
 
     if not citations:
@@ -283,7 +315,7 @@ def ask_json(req: AskRequest) -> AskJsonResponse:
             query=req.query,
             analysis=analysis.__dict__,
             citations=[],
-            answer="제공된 자료에서 관련 청크를 찾지 못했습니다.",
+            answer=_empty_result_message(req),
             usage={},
             elapsed_seconds=round(time.perf_counter() - started, 2),
         )
@@ -303,6 +335,25 @@ def ask_json(req: AskRequest) -> AskJsonResponse:
         },
         elapsed_seconds=round(time.perf_counter() - started, 2),
     )
+
+
+# --- /companies -------------------------------------------------------------
+@app.get("/companies")
+def companies(q: str | None = None, limit: int = 500) -> dict:
+    """Company names present in the index, for the briefing picker.
+
+    Sorted by note count desc so the companies with real history surface first.
+    `q` does a case-insensitive substring match.
+    """
+    store, _ = _get_store_and_bm25()
+    items = store.distinct_companies()
+    if q:
+        needle = q.strip().lower()
+        items = [(name, n) for name, n in items if needle in name.lower()]
+    return {
+        "total": len(items),
+        "items": [{"company": name, "notes": n} for name, n in items[:limit]],
+    }
 
 
 # --- /reindex ---------------------------------------------------------------
