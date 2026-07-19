@@ -6,30 +6,58 @@
 
 ## 🟢 Current Status (last updated: 2026-07-19 — company_brief mode shipped)
 
-> ⚠️ **READ FIRST — the index is stale.** LanceDB was last ingested **2026-05-02**
-> (2,826 chunks / 280 files). As of 2026-07-19 the vault has **700 new + 156 changed**
-> files that are NOT indexed: all of 01_Daily since July, 00_Inbox, and the
-> reorganized company folders (`03_Companies/Antonio/검토단계/` became
-> `Inbound deal / 검토중 / 검토종료 / 투자업체`). `/companies` returns only 9 companies,
-> so most retrieval will silently miss recent work. **Run the catch-up ingest before
-> trusting any answer** — see "Reindex cost" below.
+**Index is current as of 2026-07-19: 12,625 chunks / 974 files.** The 2.5-month
+backlog (856 files, untouched since 2026-05-02) was cleared this session.
+`/companies` went from 9 → **81** companies. All vault folders are covered
+(06_Resources 4,381 · 03_Companies 3,094 · 01_Daily 2,077 · 04_Meetings 1,466 ·
+02_Persons 1,127 · 05_Projects 237 · 01a_Periodic 169 · 00_Inbox 74).
 
-### Reindex cost (measured 2026-07-19 — do not re-estimate from the old 25-min figure)
+Note the vault was reorganized since May: `03_Companies/Antonio/검토단계/` is now
+`Inbound deal / 검토중 / 검토종료 / 투자업체`.
 
-`--incremental` for the current backlog is **856 files → 11,438 chunks → ~11 hours** on
-this machine (16 CPU threads, no CUDA). Measured throughput: **~110s per batch of 32**.
-A synthetic batch of 32 × 900-char Korean chunks takes 37s, so this is BGE-M3 being
-genuinely slow on CPU, not a chunking bug — chunk sizes are bounded (p50 110 chars,
-max 1,743). The "25 min for 4,487 chunks" figure elsewhere in this doc does not
-reproduce; treat it as stale.
+### Reindex: always use `scripts/catchup_ingest.py`, not a bare `--incremental`
 
-Practical guidance:
-- Run the catch-up **overnight** (`uv run python -m rag.ingest.pipeline --incremental`).
-- **Do not run the API server during ingest** — both hold large models and contend for CPU.
-- `--paths` a subfolder to unblock a specific task (e.g. 03_Companies alone is
-  164 files / 3,087 chunks / ~3h).
-- `detect_vault_changes` handles deletes correctly (currently reports 0 deleted), so
-  incremental is safe and non-destructive; a `--full` re-embed is NOT needed.
+`index_files` embeds every pending chunk and writes **once at the end**, so one long
+`--incremental` is all-or-nothing — a 2026-07-19 run was interrupted at 4% and lost
+all 31 minutes of work. `scripts/catchup_ingest.py` slices the same backlog into
+batches (default 40 files) that each persist on completion, and resumes automatically
+because indexed files get a fresh `ingested_at`.
+
+    uv run python scripts/catchup_ingest.py                 # whole backlog
+    uv run python scripts/catchup_ingest.py --only 03_Companies
+    uv run python scripts/catchup_ingest.py --dry-run       # report backlog size
+
+Measured 2026-07-19 (16 CPU threads, no CUDA): **851 files / ~9,800 chunks in 164
+minutes**, batches ranging 2.5–15 min. Do NOT trust the old "25 min for 4,487 chunks"
+figure elsewhere in this doc, and do not extrapolate from a single folder —
+03_Companies is unusually chunk-dense and produced a 3–5× overestimate.
+
+Two things that actually move the needle:
+- **Do not run the API server during ingest.** Measured: 110s/batch with the server up
+  vs 63s with it down. Kill it with PowerShell (`Get-CimInstance Win32_Process | Where
+  CommandLine -match uvicorn`) — `pkill` does not exist in this Git Bash.
+- **Watch free RAM.** One batch took 47.6 min instead of the usual 5–15; free physical
+  memory was 0.4 GB of 15.5 GB and the machine was paging. The ingest process alone
+  holds ~5 GB.
+- `detect_vault_changes` handles deletes correctly, so incremental is non-destructive;
+  a `--full` re-embed is never needed for catch-up.
+
+### Known vault data issues (found 2026-07-19, not yet fixed)
+
+- **3 files have unparseable frontmatter** — the body is indexed but ALL metadata is
+  lost, so they can never match a `company` / date filter (i.e. they are invisible to
+  company_brief and enumerate):
+  `03_Companies/Antonio/검토중/지엘켐/지엘켐.md` (ScannerError: unquoted alias char),
+  `04_Meetings/행사/국토부 운용위/국토부 운용위.md` and
+  `04_Meetings/행사/바이오SPC 기획위원회/바이오SPC 기획위원회.md` (both
+  ConstructorError: unhashable key — a `[[wikilink]]` sitting in a YAML key position).
+- **`meeting_krun` (6 notes) and `meeting_antonio` (4 notes) appear as company names**
+  in `/companies` — template placeholders leaking into the `company` frontmatter field,
+  same class of bug as the `company: [[meeting]]` case `scripts/audit_frontmatter.py`
+  already fixes.
+- **7 body-less stub notes** (36–64 bytes, frontmatter only) produce zero chunks, so
+  they never get an `ingested_at` and permanently show up in the catch-up backlog.
+  Harmless, but the backlog never reads as truly empty.
 
 ### company_brief mode (2026-07-19) — ✅ validated end-to-end
 
@@ -47,9 +75,16 @@ Pre-meeting context restore for a single company. Bypasses the analyzer entirely
 - Plugin: command `회사 브리핑 (미팅 전 맥락 복원)` → `CompanyPickerModal`, pre-filtered
   by the active file's company folder.
 
-**Verified 2026-07-19** against 로드원오원 (3 notes / 72 chunks, 34s, 18.9K input tokens):
-correct 4-section output with real financial + legal detail pulled from full text, and
-4 genuinely unresolved items surfaced. Failure paths also checked — unknown company
+Generation ceiling is raised to **8192 tokens for this mode only** (`_max_tokens_for`
+in `apps/fastapi_server.py`). The 2048 default truncated a briefing mid-sentence at
+exactly `output_tokens=2048`.
+
+**Verified 2026-07-19** twice — first against 로드원오원 on the stale index (3 notes /
+72 chunks, 34s), then against 레디로버스트머신 on the fresh index (5 notes / 115 chunks,
+60K input tokens, 43s). The second produced a correct 4-section briefing: full timeline
+IR → 예비검토 → 투심1차 → 투심2차, synthesis covering valuation (프리밸류 430억,
+케이런 20억 RCPS) and the 매출 추정 dispute, plus 8 genuinely unresolved requests each
+traced to the note that raised them. Failure paths also checked — unknown company
 returns a fix-it message naming `config/aliases.yaml`; missing `company` returns 400.
 
 <details><summary>Previous status header (2026-05-02)</summary>
