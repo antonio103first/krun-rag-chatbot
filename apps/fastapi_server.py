@@ -209,6 +209,18 @@ def _analyze_and_retrieve(req: AskRequest, store, bm25):
     return query, analysis, result
 
 
+# A full briefing is a timeline + synthesis + open-items list over every note
+# filed under the company, so it routinely outruns the 2048-token default —
+# 레디로버스트머신 (5 notes) was truncated mid-item at the ceiling. Other modes
+# keep the configured limit.
+COMPANY_BRIEF_MAX_TOKENS = 8192
+
+
+def _max_tokens_for(mode: str) -> int | None:
+    """Per-mode generation ceiling. None = use the configured default."""
+    return COMPANY_BRIEF_MAX_TOKENS if mode == "company_brief" else None
+
+
 def _sse(event: str, data: Any) -> str:
     payload = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False, default=str)
     return f"event: {event}\ndata: {payload}\n\n"
@@ -266,9 +278,12 @@ def ask_stream(req: AskRequest):
 
             # 3. Generate
             client = _get_client()
-            user_message = build_user_message(req.query, citations, mode=getattr(result, "mode", "lookup"))
+            mode = getattr(result, "mode", "lookup")
+            user_message = build_user_message(req.query, citations, mode=mode)
             chunks: list[str] = []
-            for chunk in client.stream_iter(SYSTEM_PROMPT_KO, user_message):
+            for chunk in client.stream_iter(
+                SYSTEM_PROMPT_KO, user_message, max_tokens=_max_tokens_for(mode)
+            ):
                 chunks.append(chunk)
                 yield _sse("delta", {"text": chunk})
 
@@ -321,7 +336,12 @@ def ask_json(req: AskRequest) -> AskJsonResponse:
         )
 
     client = _get_client()
-    gen = client.stream(SYSTEM_PROMPT_KO, build_user_message(req.query, citations, mode=getattr(result, "mode", "lookup")))
+    mode = getattr(result, "mode", "lookup")
+    gen = client.stream(
+        SYSTEM_PROMPT_KO,
+        build_user_message(req.query, citations, mode=mode),
+        max_tokens=_max_tokens_for(mode),
+    )
     return AskJsonResponse(
         query=req.query,
         analysis=analysis.__dict__,
