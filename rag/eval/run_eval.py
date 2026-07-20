@@ -79,7 +79,7 @@ def _evaluate_item(
     do_generate: bool,
 ) -> ItemResult:
     from rag.config import get_settings
-    from rag.generation.claude_client import ClaudeClient
+    from rag.generation.factory import build_client
     from rag.generation.prompts import SYSTEM_PROMPT_KO, build_user_message
     from rag.retrieval.citations import build_citations
     from rag.retrieval.hybrid_search import hybrid_search
@@ -127,7 +127,13 @@ def _evaluate_item(
     res.person_hits = sum(1 for p in expected_persons if p in actual_persons)
 
     if do_generate and citations:
-        client = ClaudeClient()
+        # Route through the factory so eval exercises whatever provider the app
+        # is configured for. Hard-wiring ClaudeClient meant that after the
+        # switch to Gemini every generation failed on an exhausted Anthropic
+        # balance — and because the failure was recorded as a per-item note
+        # rather than raised, the run still reported a summary, making it look
+        # like a retrieval regression.
+        client = build_client()
         user_msg = build_user_message(res.query, citations)
         try:
             gen = client.stream(SYSTEM_PROMPT_KO, user_msg, max_tokens=1024)
@@ -181,6 +187,12 @@ def _summarize(results: list[ItemResult]) -> dict[str, Any]:
         "must_contain_rate": round(must_contain_rate, 3),
         "must_not_contain_rate": round(must_not_rate, 3),
         "avg_latency_seconds": round(avg_latency, 2),
+        # Generation failures are recorded per item and would otherwise be
+        # invisible in the summary — a run where every answer errored still
+        # printed a full set of rates, which read as a retrieval regression.
+        "generation_errors": sum(
+            1 for r in active if any(n.startswith("generation error") for n in r.notes)
+        ),
     }
 
 
@@ -274,6 +286,12 @@ def main(argv: list[str] | None = None) -> int:
 
     # Phase 1D Gate (per claude.md): retrieval Recall@8 >= 0.7, faithfulness >= 0.85.
     # We report the closest proxies; treat <0.7 file recall as a soft warn.
+    if summary.get("generation_errors"):
+        print(
+            f"\n[WARN] {summary['generation_errors']} item(s) failed to generate an "
+            "answer — must_contain rates below are not meaningful. Check the "
+            "provider key before reading any score as a retrieval result."
+        )
     if summary["file_match_rate"] < 0.7:
         print("\n[WARN] file_match_rate < 0.7 — Phase 1D Gate not yet met for retrieval.")
         return 0
