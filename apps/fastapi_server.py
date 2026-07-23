@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
 import time
 from collections.abc import Iterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -32,6 +34,7 @@ from pydantic import BaseModel, Field
 from rag.config import get_settings
 from rag.generation.factory import GenerationClient, active_model_name, build_client
 from rag.generation.prompts import SYSTEM_PROMPT_KO, build_user_message
+from rag.ingest.embedder import get_default_embedder
 from rag.retrieval.citations import Citation, build_citations
 from rag.retrieval.hybrid_search import company_brief_search, hybrid_search
 from rag.retrieval.query_analyzer import QueryAnalysis, analyze_query
@@ -41,7 +44,34 @@ from rag.store.lancedb_store import open_store
 log = logging.getLogger("krun_rag.api")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-app = FastAPI(title="KRUN RAG API", version="0.2.0")
+
+def _warmup_embedder() -> None:
+    """Load bge-m3 eagerly so the first `/ask` doesn't eat the ~9s model load.
+
+    Runs in a background thread: the server stays responsive (/health works
+    immediately) while the embedder loads in parallel right after boot.
+    """
+    try:
+        s = get_settings()
+        emb = get_default_embedder(
+            model_name=s.embedding.model_name,
+            device=s.embedding.device,
+            batch_size=s.embedding.batch_size,
+            max_seq_length=s.embedding.max_seq_length,
+        )
+        emb.load()
+        log.info("embedder warmup complete (device=%s)", emb.device)
+    except Exception:  # noqa: BLE001
+        log.exception("embedder warmup failed (first /ask will load it lazily)")
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    threading.Thread(target=_warmup_embedder, daemon=True).start()
+    yield
+
+
+app = FastAPI(title="KRUN RAG API", version="0.2.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -445,3 +475,24 @@ def reindex(req: ReindexRequest) -> dict:
     t = threading.Thread(target=_run_reindex, args=(req.mode,), daemon=True)
     t.start()
     return {"started": True, "mode": req.mode}
+
+
+# --- /shutdown --------------------------------------------------------------
+@app.post("/shutdown")
+def shutdown() -> dict:
+    """Turn the KRUN RAG server off (localhost only).
+
+    Refuses while a reindex is writing to LanceDB so an abrupt exit can't
+    corrupt the index. Otherwise flushes this response, then exits the process.
+    Used by `scripts/stop_api.bat` and can be wired to an Obsidian plugin button.
+    """
+    if _state["reindex_running"]:
+        raise HTTPException(409, "Reindex running; try again after it finishes.")
+
+    def _die() -> None:
+        time.sleep(0.3)  # let the HTTP response flush first
+        log.info("shutdown requested — exiting")
+        os._exit(0)
+
+    threading.Thread(target=_die, daemon=True).start()
+    return {"stopping": True}

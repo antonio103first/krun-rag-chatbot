@@ -105,6 +105,32 @@ IR → 예비검토 → 투심1차 → 투심2차, synthesis covering valuation 
 traced to the note that raised them. Failure paths also checked — unknown company
 returns a fix-it message naming `config/aliases.yaml`; missing `company` returns 400.
 
+### Cold-start fix + off switch (2026-07-23) — ✅ verified
+
+Boot logs showed no error — just a `HF_TOKEN` warning and ~9s of HuggingFace Hub
+HEAD/GET requests on the first `/ask`. Root cause: bge-m3 is already cached, but
+`SentenceTransformer()` re-validates the model against the Hub online on every
+process start, and the embedder loads lazily on the first query.
+
+- **`scripts/run_api.bat`** now sets `HF_HUB_OFFLINE=1` + `TRANSFORMERS_OFFLINE=1`
+  → cache-only load, no Hub round-trips, warning gone. (Comment out for one run
+  when you need to re-download / update the model.)
+- **`apps/fastapi_server.py`** — `lifespan` starts a background thread that calls
+  `get_default_embedder(...).load()` at boot, so the first user query no longer
+  eats the model-load latency. Verified: `embedder warmup complete (device=cpu)`,
+  0 `huggingface.co` requests, 0 HF_TOKEN warnings.
+- **`POST /shutdown`** (localhost) — refuses while a reindex is writing, else
+  flushes the response and `os._exit(0)`. Wire-able to an Obsidian plugin button.
+- **`scripts/stop_api.bat` + `scripts/stop_api.ps1`** (NEW) — the "off" switch.
+  Detects first (honest "was not running"), tries graceful `/shutdown`, then
+  force-kills the port listener **and** any `apps.fastapi_server` uvicorn process.
+  The command-line sweep matters: the server runs as a **supervisor+worker pair**,
+  so killing only the listening PID lets the parent respawn it (observed: kill
+  2072 → 16564 reappears). Logic lives in the `.ps1` because cmd `for /f` mangles
+  `^|` and unescaped `()` inside a `do ( )` block broke the bat twice.
+
+`device=cpu` here (no CUDA on this machine); CUDA path unverified.
+
 <details><summary>Previous status header (2026-05-02)</summary>
 
 ## Phase table (last updated: 2026-05-02 — Phase 2 session +1, post field-test bug fixes)
