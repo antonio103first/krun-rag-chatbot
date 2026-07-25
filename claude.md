@@ -137,20 +137,29 @@ The sidebar status pill (`● N chunks` / `● offline`) is now clickable — it
 a menu to **start** the server when offline, **shut it down** when online, or
 refresh. The old standalone `⏻ 서버 종료` toolbar button is folded into this menu.
 
-- Start runs `run_api.bat` in the background (desktop-only via Node
-  `child_process`), then polls `/health` until it comes up. Path is configurable
-  in settings (`serverScriptPath`, default fills in the known path).
-- **Windows quoting gotcha (verified):** the path contains a space
-  (`Claude AI_Personal`), so `cmd /c "<path>"` self-strips its quotes and splits
-  at the space — the bat never runs and the pill sticks on `starting…`. The
-  working form is `cp.spawn('"'+script+'"', {shell:true, detached:true})` → Node
-  emits `cmd /d /s /c ""<path>""` and `/s` strips only the outer pair. `start`
-  fails too (detached = no console to open a window in). Confirmed by process
-  creation-time: OFF → spawn → a python whose CreationDate is *after* the spawn.
-- Touches `src/view.ts` (pill menu, `startServer`, `pollUntilOnline`),
-  `src/api.ts` (`shutdown`), `src/settings.ts` (`serverScriptPath`). Rebuild with
-  `npm run build` and redeploy `main.js`. In-Obsidian click itself is unverified
-  (can't drive the desktop UI); OS-level start/stop and bundle contents are.
+- Start launches the **venv Python directly** (desktop-only via Node
+  `child_process`), then polls `/health` until it comes up. The bat path is
+  configurable in settings (`serverScriptPath`); the interpreter and bind
+  host/port are derived from it and the server URL.
+- **Why not run the .bat?** Two failures, found in order. (1) The path has a
+  space (`Claude AI_Personal`), so `cmd /c "<path>"` self-strips its quotes and
+  splits at the space. (2) The deeper one: **Obsidian's process env usually
+  lacks `~/.local/bin`, so the bat's `uv run uvicorn` fails silently** and the
+  pill sticks on `starting…` — this bit a real user after the quoting was fixed.
+  A git-bash test passed only because that shell had `uv` on PATH. Reproduced by
+  scrubbing PATH: `[A]` bat → never starts, `[B]` venv python → online.
+- **Working form:** `cp.spawn(python, ["-m","uvicorn","apps.fastapi_server:app",
+  "--host",host,"--port",port], {cwd: root, env: {...process.env,
+  HF_HUB_OFFLINE:"1", TRANSFORMERS_OFFLINE:"1"}, detached:true, stdio:"ignore"})`
+  where `python = <root>/.venv/Scripts/python.exe` (derived from the bat path).
+  Self-contained interpreter → no `uv`, no PATH, no cmd quote-strip. Falls back
+  to the bat (shell:true + quoted path) only if the venv python is missing.
+- The running `python.exe` **is** the server (background, no console window);
+  `서버 종료` / `stop_api.bat` reap it. Touches `src/view.ts` (pill menu,
+  `startServer`, `pollUntilOnline`), `src/api.ts` (`shutdown`), `src/settings.ts`
+  (`serverScriptPath`). Rebuild `npm run build`, redeploy `main.js`. Verified at
+  OS level in a scrubbed-PATH (Obsidian-like) env; the in-Obsidian click UI still
+  relies on the user to confirm after reloading the plugin.
 
 <details><summary>Previous status header (2026-05-02)</summary>
 

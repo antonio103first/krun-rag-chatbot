@@ -186,14 +186,15 @@ export class KrunRagView extends ItemView {
     menu.showAtMouseEvent(evt);
   }
 
-  /** Launch the RAG server by running run_api.bat in the background.
+  /** Launch the RAG server in the background.
    *
-   * Desktop-only (manifest isDesktopOnly=true). The path contains a space
-   * ("Claude AI_Personal"), which makes `cmd /c "<path>"` self-strip its quotes
-   * and split at the space (verified: the bat never runs). The reliable form is
-   * shell:true with the path pre-quoted — Node wraps it as `cmd /d /s /c
-   * ""<path>""` and /s strips only the outer pair, leaving the path quoted.
-   * Detached + unref so the server outlives Obsidian; then poll /health.
+   * Desktop-only (manifest isDesktopOnly=true). We launch the venv Python
+   * DIRECTLY rather than the .bat: Obsidian's process env frequently lacks
+   * ~/.local/bin, so the bat's `uv run uvicorn` fails silently and the pill
+   * sticks on "starting…" (verified by reproducing with a scrubbed PATH). The
+   * venv interpreter is self-contained — no `uv`, no PATH, no cmd quote-strip on
+   * the spaced path. We set the HF-offline env here to match run_api.bat. Falls
+   * back to the .bat only if the venv python isn't found.
    */
   private startServer(): void {
     const script = this.plugin.settings.serverScriptPath?.trim();
@@ -202,18 +203,53 @@ export class KrunRagView extends ItemView {
       return;
     }
     try {
-      // Node require is available in Obsidian's Electron desktop runtime.
+      // Node modules are available in Obsidian's Electron desktop runtime.
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const cp = require("child_process");
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const nodePath = require("path");
-      const child = cp.spawn(`"${script}"`, {
-        cwd: nodePath.dirname(script),
-        shell: true,
-        detached: true,
-        stdio: "ignore",
-        windowsHide: true,
-      });
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const fs = require("fs");
+
+      // <root>/scripts/run_api.bat → <root>/.venv/Scripts/python.exe
+      const root = nodePath.dirname(nodePath.dirname(script));
+      const python = nodePath.join(root, ".venv", "Scripts", "python.exe");
+
+      // Where to bind — parsed from the configured server URL.
+      let host = "127.0.0.1";
+      let port = "8765";
+      try {
+        const u = new URL(this.plugin.settings.serverUrl);
+        host = u.hostname || host;
+        port = u.port || port;
+      } catch {
+        /* keep defaults */
+      }
+
+      let child;
+      if (fs.existsSync(python)) {
+        child = cp.spawn(
+          python,
+          ["-m", "uvicorn", "apps.fastapi_server:app", "--host", host, "--port", port],
+          {
+            cwd: root,
+            env: { ...process.env, HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" },
+            detached: true,
+            stdio: "ignore",
+            windowsHide: true,
+          },
+        );
+      } else {
+        // Fallback: run the bat. shell:true + pre-quoted path survives the space
+        // (Node emits `cmd /d /s /c ""<path>""`; /s strips only the outer pair).
+        child = cp.spawn(`"${script}"`, {
+          cwd: nodePath.dirname(script),
+          shell: true,
+          detached: true,
+          stdio: "ignore",
+          windowsHide: true,
+        });
+      }
       child.on("error", (e: Error) => new Notice(`서버 시작 실패: ${e.message}`));
       child.unref();
       new Notice("KRUN RAG 서버를 백그라운드로 시작합니다… (수 초 대기)");
