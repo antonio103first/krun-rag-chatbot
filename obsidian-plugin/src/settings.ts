@@ -8,6 +8,8 @@ export interface KrunRagSettings {
   noAnalyze: boolean;
   maxChunksPerFile: number;
   sendActiveNote: boolean;
+  /** Path to run_api.bat — used by the status-pill "서버 시작" menu (desktop only). */
+  serverScriptPath: string;
 }
 
 export const DEFAULT_SETTINGS: KrunRagSettings = {
@@ -17,6 +19,7 @@ export const DEFAULT_SETTINGS: KrunRagSettings = {
   noAnalyze: false,
   maxChunksPerFile: 2,
   sendActiveNote: false,
+  serverScriptPath: "C:\\Users\\anton\\Documents\\Claude AI_Personal\\krun-rag-chatbot\\scripts\\run_api.bat",
 };
 
 export class KrunRagSettingTab extends PluginSettingTab {
@@ -41,6 +44,19 @@ export class KrunRagSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.serverUrl)
           .onChange(async (v) => {
             this.plugin.settings.serverUrl = v.trim().replace(/\/$/, "");
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("서버 실행 파일 (run_api.bat)")
+      .setDesc("상태 표시를 클릭해 '서버 시작'을 누르면 이 .bat 을 실행합니다. (데스크톱 전용)")
+      .addText((t) =>
+        t
+          .setPlaceholder("C:\\...\\krun-rag-chatbot\\scripts\\run_api.bat")
+          .setValue(this.plugin.settings.serverScriptPath)
+          .onChange(async (v) => {
+            this.plugin.settings.serverScriptPath = v.trim();
             await this.plugin.saveSettings();
           }),
       );

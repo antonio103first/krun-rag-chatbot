@@ -55,6 +55,8 @@ Rules:
 - Fund / 펀드 references ("케이런 6호", "케이런 7호 펀드", "소부장2호", "펀드 N호") are NOT companies. Do NOT put them in `companies`. Add "project" to `doc_types` for fund-related questions (펀드LP관리 lives under 05_Projects).
 - 정기조합원총회 / 조합원총회 / LP보고 / LP미팅 → also "project" + "meeting".
 - "action item" / "액션 아이템" / "해야할 일" / "할 일" / "to-do" / "todo" / "체크리스트" / "예정된 일정" / "예정 일정" → ALWAYS use intent="lookup" (NOT enumerate), even if a date range is given. These ask about content INSIDE notes (specific sections like ✅ Action Items / 📅 날짜지정), so we need hybrid search of body text, not a metadata-only file enumeration.
+- Content-conditional listings — when the listing predicate is a SEMANTIC condition that requires reading note bodies (geography like "남부권/수도권", sector like "소부장/바이오", fund-purpose like "주목적/주요투자분야", deal-stage opinion, qualitative judgment) — use intent="lookup", NOT enumerate. enumerate is for predicates expressible as structural metadata filters only (date / company / person / doc_type). When the predicate is "X에 해당하는", "X인", "X 관련" with X being a body-content concept, stay in lookup so BM25/vector can find the right notes.
+- Bare-mention queries — "X 관련한 내용", "X에 대해 알려줘", "X 얘기", "X 어떻게 됐지" with NO additional context (no time qualifier, no doc_type hint, no other entity) → leave `companies` / `persons` EMPTY and just put X in `rewritten_query`. The user wants any note that mentions X, not a metadata-narrowed view. Reason: X may be mentioned only in passing inside someone else's meeting note (where the chunk's `company` / `person` metadata field is NULL or different), and a strict company/person WHERE filter would drop those hits. Only populate `companies` / `persons` when the query asks for a focused analysis OF that entity ("X 1차DD 리스크", "X 검토 진행상황", "X 미팅 요약") AND the entity is plausibly a vault-registered top-level subject.
 
 Examples (today=2026-04-29):
 Q: 위밋모빌리티 1차DD 핵심 리스크
@@ -77,6 +79,18 @@ A: {"rewritten_query":"투자한 업체","intent":"enumerate","companies":[],"pe
 
 Q: 케이런 7호 펀드 정기조합원총회 내용
 A: {"rewritten_query":"7호 펀드 정기조합원총회","intent":"lookup","companies":[],"persons":[],"doc_types":["project","meeting"],"tags":[],"date_range":{"from":null,"to":null}}
+
+Q: 7호조합 주목적 중 남부권에 해당하는 검토업체 리스트
+A: {"rewritten_query":"7호 펀드 주목적 남부권 검토 업체","intent":"lookup","companies":[],"persons":[],"doc_types":["meeting","company","project"],"tags":[],"date_range":{"from":null,"to":null}}
+
+Q: 소부장 분야 검토 회사 리스트
+A: {"rewritten_query":"소부장 검토 회사","intent":"lookup","companies":[],"persons":[],"doc_types":["meeting","company"],"tags":[],"date_range":{"from":null,"to":null}}
+
+Q: 로텀 관련한 내용
+A: {"rewritten_query":"로텀","intent":"lookup","companies":[],"persons":[],"doc_types":[],"tags":[],"date_range":{"from":null,"to":null}}
+
+Q: 박정인 담당자에 대해 알려줘
+A: {"rewritten_query":"박정인 담당자","intent":"lookup","companies":[],"persons":[],"doc_types":[],"tags":[],"date_range":{"from":null,"to":null}}
 """
 
 
@@ -93,6 +107,9 @@ class QueryAnalysis:
     date_to: str | None = None
     used_fallback: bool = False
     latency_ms: int = 0
+    # Set when the analyzer call itself failed (dead key, quota, network).
+    # Distinguishes "no filters were needed" from "we never got to ask".
+    error: str | None = None
 
     def is_empty_filter(self) -> bool:
         return not (
@@ -125,13 +142,68 @@ def _fallback(query: str) -> QueryAnalysis:
     return QueryAnalysis(raw=query, rewritten_query=query, used_fallback=True)
 
 
+def _analyze_anthropic(prompt: str, client: Anthropic | None) -> str:
+    s = get_settings()
+    client = client or Anthropic(api_key=s.anthropic_api_key)
+    extra_headers: dict[str, str] = {}
+    if s.generation.zdr_enabled:
+        extra_headers["anthropic-zero-retention-window"] = "0"
+    msg = client.messages.create(
+        model=s.generation.analyzer_model,
+        max_tokens=400,
+        temperature=0.0,
+        system=[
+            {
+                "type": "text",
+                "text": SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+        messages=[{"role": "user", "content": prompt}],
+        extra_headers=extra_headers or None,
+    )
+    return msg.content[0].text if msg.content else ""
+
+
+def _analyze_gemini(prompt: str) -> str:
+    """Same prompt, Gemini backend. JSON mode keeps `_strip_to_json` honest."""
+    from google import genai
+
+    from rag.generation.gemini_client import GeminiUnavailable, resolve_gemini_key
+
+    s = get_settings()
+    key = resolve_gemini_key(s)
+    if not key:
+        raise GeminiUnavailable("GEMINI_API_KEY 없음 (질의 분석기)")
+    client = genai.Client(api_key=key)
+    resp = client.models.generate_content(
+        model=s.generation.gemini_analyzer_model,
+        contents=prompt,
+        config=genai.types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            temperature=0.0,
+            max_output_tokens=400,
+            response_mime_type="application/json",
+            thinking_config=genai.types.ThinkingConfig(thinking_budget=0),
+        ),
+    )
+    return resp.text or ""
+
+
 def analyze_query(
     query: str,
     *,
     client: Anthropic | None = None,
     today: date | None = None,
 ) -> QueryAnalysis:
-    """Call Haiku to analyze the query. Returns a fallback on any error."""
+    """Extract structured filters from the query.
+
+    Returns a fallback analysis on any error — retrieval still works without
+    filters, just less precisely. The error is logged rather than swallowed:
+    a dead API key used to degrade every search silently, with the only
+    symptom being worse answers.
+    """
+    import logging
     import time
 
     s = get_settings()
@@ -139,39 +211,25 @@ def analyze_query(
         return _fallback(query)
 
     today = today or date.today()
-    client = client or Anthropic(api_key=s.anthropic_api_key)
-
-    extra_headers: dict[str, str] = {}
-    if s.generation.zdr_enabled:
-        extra_headers["anthropic-zero-retention-window"] = "0"
+    prompt = f"today={today.isoformat()}\nQ: {query}\nA:"
 
     started = time.perf_counter()
     try:
-        msg = client.messages.create(
-            model=s.generation.analyzer_model,
-            max_tokens=400,
-            temperature=0.0,
-            system=[
-                {
-                    "type": "text",
-                    "text": SYSTEM_PROMPT,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"today={today.isoformat()}\nQ: {query}\nA:",
-                }
-            ],
-            extra_headers=extra_headers or None,
+        if s.generation.provider == "gemini":
+            text = _analyze_gemini(prompt)
+        else:
+            text = _analyze_anthropic(prompt, client)
+    except Exception as e:
+        logging.getLogger(__name__).warning(
+            "query analyzer unavailable (%s: %s) — falling back to unfiltered search",
+            type(e).__name__,
+            e,
         )
-    except Exception:
-        return _fallback(query)
+        out = _fallback(query)
+        out.error = f"{type(e).__name__}: {e}"
+        return out
 
     elapsed_ms = int((time.perf_counter() - started) * 1000)
-
-    text = msg.content[0].text if msg.content else ""
     payload = _strip_to_json(text)
     try:
         data = json.loads(payload)

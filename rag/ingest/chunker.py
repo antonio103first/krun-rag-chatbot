@@ -180,6 +180,15 @@ def chunk_note(
 
         for st in sub_texts:
             display = st.strip()
+            # Skip header-only chunks. Vault notes are template-driven and many
+            # sections are never filled in ("## 주요 논의" with nothing under
+            # it), which produced 2,032 body-less chunks — 16% of the index.
+            # They still match queries through the breadcrumb text, so they
+            # displaced real content from top-K: a search for 투심 지적사항
+            # surfaced two empty "주요 논의" chunks ahead of the chunk holding
+            # the actual discussion.
+            if not display:
+                continue
             if preserve_breadcrumb and breadcrumb:
                 display = f"[{breadcrumb}]\n{display}"
             chunk_id = hashlib.sha256(

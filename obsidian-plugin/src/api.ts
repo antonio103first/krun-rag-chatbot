@@ -9,6 +9,7 @@ export interface CitationOut {
   header_path: string;
   obsidian_uri: string;
   doc_type: string;
+  category?: string;
   company: string | null;
   person: string | null;
   date: string | null;
@@ -22,13 +23,21 @@ export interface AskRequest {
   reranker?: boolean | null;
   max_chunks_per_file?: number;
   active_note?: string | null;
+  /** "company_brief" bypasses the analyzer; requires `company`. */
+  mode?: "company_brief" | null;
+  company?: string | null;
+}
+
+export interface CompanyEntry {
+  company: string;
+  notes: number;
 }
 
 export interface AskCallbacks {
   onAnalysis?: (a: Record<string, unknown>) => void;
   onCitations?: (items: CitationOut[], whereClause: string | null) => void;
   onDelta?: (text: string) => void;
-  onDone?: (info: { elapsed_seconds: number; answer_length?: number }) => void;
+  onDone?: (info: { elapsed_seconds: number; answer_length?: number; used_citation_indices?: number[] }) => void;
   onError?: (msg: string) => void;
 }
 
@@ -67,6 +76,36 @@ export class KrunRagApi {
       body: JSON.stringify({ mode }),
     });
     if (!r.ok) throw new Error(`reindex failed: ${r.status} ${await r.text()}`);
+  }
+
+  /** Turn the server off via POST /shutdown.
+   *
+   * The server answers 200 (`{stopping:true}`) and exits ~0.3s later, so a
+   * successful response is the "accepted" signal. A 409 means a reindex is
+   * writing — refuse honestly. A network error most likely means the server was
+   * already down, so we report that rather than pretending we stopped it.
+   */
+  async shutdown(): Promise<{ ok: boolean; message?: string }> {
+    try {
+      const r = await fetch(`${this.baseUrl}/shutdown`, { method: "POST" });
+      if (r.status === 409) return { ok: false, message: (await r.text()) || "재색인 중이라 종료할 수 없습니다." };
+      if (!r.ok) return { ok: false, message: `서버가 ${r.status} 반환` };
+      return { ok: true };
+    } catch {
+      return { ok: false, message: "서버에 연결할 수 없습니다 (이미 꺼져 있을 수 있음)." };
+    }
+  }
+
+  /** Company names present in the index, note-count desc. Empty on failure. */
+  async companies(): Promise<CompanyEntry[]> {
+    try {
+      const r = await fetch(`${this.baseUrl}/companies`, { method: "GET" });
+      if (!r.ok) return [];
+      const d = (await r.json()) as { items?: CompanyEntry[] };
+      return d.items ?? [];
+    } catch {
+      return [];
+    }
   }
 
   /** Ask a question; streams events via callbacks. Returns an AbortController. */

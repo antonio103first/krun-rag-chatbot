@@ -79,6 +79,17 @@ retrieval:
 
 # --- Generation --------------------------------------------------------------
 generation:
+  # "gemini" (free tier) | "anthropic" (paid, higher quality).
+  # Switched to gemini 2026-07-19: a company briefing cost ~245 KRW per run on
+  # Sonnet and the credit balance ran out during normal use. Override per-run
+  # with RAG_PROVIDER=anthropic in the environment.
+  provider: "gemini"
+
+  # Used when provider == "gemini"
+  gemini_model: "gemini-2.5-flash"
+  gemini_analyzer_model: "gemini-2.5-flash"
+
+  # Used when provider == "anthropic"
   gen_model: "claude-sonnet-4-6"
   analyzer_model: "claude-haiku-4-5"
   max_tokens: 2048

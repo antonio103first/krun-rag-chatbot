@@ -139,13 +139,36 @@ def build_user_message(query: str, citations: list[Citation], mode: str = "looku
     `mode="enumerate"` swaps the instruction to emphasize completeness over
     depth — used when retrieval bypassed semantic ranking and supplied every
     matching file in the date/filter window.
+
+    `mode="company_brief"` is the pre-meeting context restore: same completeness
+    guarantee, but the recent notes arrive in full text, so the answer can carry
+    a narrative and flag unresolved requests instead of just listing titles.
     """
     if not citations:
         ctx = "(컨텍스트 없음)"
     else:
         ctx = format_context_block(citations)
 
-    if mode == "enumerate":
+    if mode == "company_brief":
+        instruction = (
+            "위 컨텍스트는 이 회사의 `company` 메타데이터가 붙은 **모든 노트**입니다. "
+            "최근 노트는 전문(全文)이, 오래된 노트는 대표 청크만 포함돼 있습니다. "
+            "미팅 직전 5분 안에 맥락을 복원하는 것이 목적이니, 아래 4개 섹션으로만 답하세요.\n\n"
+            "1) 제목 줄: `## {회사명} — 미팅 N건 (최초일 ~ 최근일)`. "
+            "그 아래 굵게 `**현재 단계**: {가장 최근 노트의 단계}` · "
+            "`**최근 접촉**: {최근 날짜}`. 단계를 알 수 없으면 그 항목은 생략하세요.\n"
+            "2) `### 경위` — 모든 노트를 시간순(오름차순)으로 한 줄씩 "
+            "빠짐없이: `- YYYY-MM-DD | 유형 | 한 줄 요약 [n]`. 인용 없는 줄 금지.\n"
+            "3) `### 핵심` — 논의가 어떻게 흘러왔고 우리 쪽 판단이 어떻게 "
+            "변했는지 2~3문단. 밸류에이션·투자조건·리스크가 나오면 반드시 포함.\n"
+            "4) `### 이번 미팅 전 확인` — 과거 노트에서 **우리가 요청했거나 "
+            "숙제로 남긴 항목 중, 이후 노트에 답이 보이지 않는 것**을 불릿으로. "
+            "각 항목에 언제 요청했는지 [n]로 표시. 해당 사항이 없으면 "
+            "'미해결 항목 없음'이라고 쓰세요. **추측으로 항목을 만들지 마세요.**\n\n"
+            "전문이 없는 오래된 노트는 제목·대표 청크 수준까지만 단정하고, "
+            "내용이 부족하면 그렇다고 밝히세요. 컨텍스트 외 정보 추가 금지."
+        )
+    elif mode == "enumerate":
         instruction = (
             "위 컨텍스트는 질문의 필터(날짜/회사/인물)에 매칭되는 **모든 노트**의 대표 청크입니다. "
             "검색 순위가 아니라 메타데이터 매칭 결과이므로 누락된 항목이 없습니다.\n"

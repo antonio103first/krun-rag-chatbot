@@ -91,6 +91,14 @@ def _person_short(name: str) -> str | None:
 SUSPICIOUS_TOKENS = {
     "meeting", "company", "person", "people", "daily", "weekly", "monthly",
     "dashboard", "untitled", "template", "n/a", "na", "tbd", "todo",
+    # Scope-suffixed template residue. The meeting template carries
+    # `company: [[meeting_antonio]]` / `[[meeting_krun]]` variants, and those
+    # slipped past the bare "meeting" check — 11 files still carried them on
+    # 2026-07-20. A polluted `company` is worse than a missing one: retrieval
+    # builds `company IN ('시너지')`, so the note is excluded from every
+    # company-filtered search rather than merely ranking lower.
+    "meeting_antonio", "meeting_krun", "meeting_person",
+    "inbound", "inbound_deal",
     "회의", "미팅", "회사", "인물", "템플릿",
 }
 

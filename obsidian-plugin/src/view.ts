@@ -1,5 +1,5 @@
-import { ItemView, MarkdownRenderer, Notice, TFile, WorkspaceLeaf } from "obsidian";
-import { CitationOut, KrunRagApi } from "./api";
+import { ItemView, MarkdownRenderer, Menu, Notice, TFile, WorkspaceLeaf } from "obsidian";
+import { AskRequest, CitationOut, KrunRagApi } from "./api";
 import type KrunRagPlugin from "./main";
 
 export const KRUN_RAG_VIEW_TYPE = "krun-rag-view";
@@ -11,6 +11,7 @@ interface Turn {
   metaEl: HTMLElement;
   rawAnswer: string;
   startedAt: number;
+  usedIndices?: number[]; // populated on `done`; restricts citation cards to ones the answer actually cites
 }
 
 export class KrunRagView extends ItemView {
@@ -49,17 +50,29 @@ export class KrunRagView extends ItemView {
     // Header
     const header = root.createDiv({ cls: "krun-rag-header" });
     header.createEl("strong", { text: "KRUN RAG" });
+    // The status pill doubles as the on/off control: click it to start
+    // (run_api.bat) when offline or shut down when online.
     this.statusEl = header.createSpan({ cls: "krun-rag-status", text: "checking…" });
+    this.statusEl.style.cursor = "pointer";
+    this.statusEl.onclick = (e) => this.openServerMenu(e);
 
-    // Toolbar
+    // Primary actions — the two things that aren't "type a question".
+    const actions = root.createDiv({ cls: "krun-rag-actions" });
+    const briefBtn = actions.createEl("button", { text: "🏢 회사 브리핑", cls: "mod-cta" });
+    briefBtn.onclick = () => this.plugin.openCompanyPicker(this);
+
+    const noteBtn = actions.createEl("button", { text: "📄 현재 노트" });
+    noteBtn.onclick = () => this.askAboutCurrentNote();
+
+    // Housekeeping — deliberately smaller and below the primary row.
     const toolbar = root.createDiv({ cls: "krun-rag-toolbar" });
-    const refreshBtn = toolbar.createEl("button", { text: "Health" });
+    const refreshBtn = toolbar.createEl("button", { text: "상태" });
     refreshBtn.onclick = () => this.refreshHealth();
 
-    const reindexBtn = toolbar.createEl("button", { text: "Reindex (incremental)" });
+    const reindexBtn = toolbar.createEl("button", { text: "재색인" });
     reindexBtn.onclick = () => this.runReindex();
 
-    const clearBtn = toolbar.createEl("button", { text: "Clear" });
+    const clearBtn = toolbar.createEl("button", { text: "대화 지우기" });
     clearBtn.onclick = () => this.clearConversation();
 
     // Active note
@@ -69,7 +82,12 @@ export class KrunRagView extends ItemView {
 
     // Conversation
     this.convoEl = root.createDiv({ cls: "krun-rag-conversation" });
-    this.convoEl.createDiv({ cls: "krun-rag-empty", text: "질문을 입력하세요. 출처를 클릭하면 노트로 이동합니다." });
+    this.convoEl.createDiv({
+      cls: "krun-rag-empty",
+      text:
+        "질문을 입력하고 Ctrl+Enter. 미팅 전이라면 위 「회사 브리핑」을 누르세요. " +
+        "답변의 [1] 같은 번호를 클릭하면 근거 노트가 열립니다.",
+    });
 
     // Input
     const inputBox = root.createDiv({ cls: "krun-rag-input" });
@@ -96,8 +114,24 @@ export class KrunRagView extends ItemView {
     this.cancel();
   }
 
-  /** Public: triggered by commands (palette / "ask about current note"). */
+  /** Ask about whatever note is open. No-op with a nudge when none is. */
+  private askAboutCurrentNote(): void {
+    const f = this.app.workspace.getActiveFile();
+    if (!f) {
+      new Notice("열려 있는 노트가 없습니다.");
+      return;
+    }
+    this.run(`[[${f.basename}]]에 대해 알려줘 — 핵심 요약과 다음에 챙길 점은?`, {});
+  }
+
+  /** Public: triggered by the palette command.
+   *
+   * Guarded: a caller can reach us before onOpen() has built the DOM (deferred
+   * leaves resolve asynchronously), and an unguarded throw here is swallowed by
+   * the caller's promise chain — which reads to the user as "nothing happened".
+   */
   focusAndPrefill(text: string): void {
+    if (!this.inputEl) return;
     this.inputEl.value = text;
     this.inputEl.focus();
     this.inputEl.setSelectionRange(this.inputEl.value.length, this.inputEl.value.length);
@@ -124,12 +158,135 @@ export class KrunRagView extends ItemView {
     if (h.ok) {
       this.statusEl.addClass("ok");
       this.statusEl.setText(`● ${h.rows ?? 0} chunks`);
-      this.statusEl.title = `vault=${h.vault_name ?? "?"}\nmodel=${h.gen_model ?? "?"}\nzdr=${h.zdr_enabled ? "on" : "off"}`;
+      this.statusEl.title = `vault=${h.vault_name ?? "?"}\nmodel=${h.gen_model ?? "?"}\nzdr=${h.zdr_enabled ? "on" : "off"}\n\n클릭: 서버 시작/종료`;
     } else {
       this.statusEl.addClass("bad");
       this.statusEl.setText("● offline");
-      this.statusEl.title = h.error ?? "server unreachable";
+      this.statusEl.title = (h.error ?? "server unreachable") + "\n\n클릭: 서버 시작";
     }
+  }
+
+  /** True when an ask failure is a network/connection error (server down),
+   *  not a real query/generation error. `fetch()` throws "TypeError: Failed to
+   *  fetch" (Chromium), "NetworkError"/"Load failed" (other engines) here. */
+  private isConnectionError(msg: string): boolean {
+    return /failed to fetch|networkerror|load failed|econnrefused|err_connection|typeerror/i.test(msg);
+  }
+
+  /** Status-pill menu: start (run_api.bat) when offline, shut down when online. */
+  private openServerMenu(evt: MouseEvent): void {
+    const online = this.statusEl.hasClass("ok");
+    const menu = new Menu();
+    if (online) {
+      menu.addItem((i) =>
+        i.setTitle("서버 종료").setIcon("power").onClick(() => this.shutdownServer()),
+      );
+    } else {
+      menu.addItem((i) =>
+        i.setTitle("서버 시작 (run_api.bat)").setIcon("play").onClick(() => this.startServer()),
+      );
+    }
+    menu.addSeparator();
+    menu.addItem((i) =>
+      i.setTitle("상태 새로고침").setIcon("refresh-cw").onClick(() => this.refreshHealth()),
+    );
+    menu.showAtMouseEvent(evt);
+  }
+
+  /** Launch the RAG server in the background.
+   *
+   * Desktop-only (manifest isDesktopOnly=true). We launch the venv Python
+   * DIRECTLY rather than the .bat: Obsidian's process env frequently lacks
+   * ~/.local/bin, so the bat's `uv run uvicorn` fails silently and the pill
+   * sticks on "starting…" (verified by reproducing with a scrubbed PATH). The
+   * venv interpreter is self-contained — no `uv`, no PATH, no cmd quote-strip on
+   * the spaced path. We set the HF-offline env here to match run_api.bat. Falls
+   * back to the .bat only if the venv python isn't found.
+   */
+  private startServer(): void {
+    const script = this.plugin.settings.serverScriptPath?.trim();
+    if (!script) {
+      new Notice("run_api.bat 경로가 비어 있습니다. 설정에서 지정하세요.");
+      return;
+    }
+    try {
+      // Node modules are available in Obsidian's Electron desktop runtime.
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const cp = require("child_process");
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const nodePath = require("path");
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const fs = require("fs");
+
+      // <root>/scripts/run_api.bat → <root>/.venv/Scripts/python.exe
+      const root = nodePath.dirname(nodePath.dirname(script));
+      const python = nodePath.join(root, ".venv", "Scripts", "python.exe");
+
+      // Where to bind — parsed from the configured server URL.
+      let host = "127.0.0.1";
+      let port = "8765";
+      try {
+        const u = new URL(this.plugin.settings.serverUrl);
+        host = u.hostname || host;
+        port = u.port || port;
+      } catch {
+        /* keep defaults */
+      }
+
+      let child;
+      if (fs.existsSync(python)) {
+        child = cp.spawn(
+          python,
+          ["-m", "uvicorn", "apps.fastapi_server:app", "--host", host, "--port", port],
+          {
+            cwd: root,
+            env: { ...process.env, HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" },
+            detached: true,
+            stdio: "ignore",
+            windowsHide: true,
+          },
+        );
+      } else {
+        // Fallback: run the bat. shell:true + pre-quoted path survives the space
+        // (Node emits `cmd /d /s /c ""<path>""`; /s strips only the outer pair).
+        child = cp.spawn(`"${script}"`, {
+          cwd: nodePath.dirname(script),
+          shell: true,
+          detached: true,
+          stdio: "ignore",
+          windowsHide: true,
+        });
+      }
+      child.on("error", (e: Error) => new Notice(`서버 시작 실패: ${e.message}`));
+      child.unref();
+      new Notice("KRUN RAG 서버를 백그라운드로 시작합니다… (수 초 대기)");
+      this.statusEl.setText("● starting…");
+      this.pollUntilOnline();
+    } catch (e) {
+      new Notice(`서버 시작 실패: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  /** Poll /health after a start until it responds ok (or we give up). */
+  private pollUntilOnline(): void {
+    let n = 0;
+    const max = 20; // ~30s: model warmup can take several seconds
+    const tick = async () => {
+      n++;
+      const h = await this.api.health();
+      if (h.ok) {
+        await this.refreshHealth();
+        new Notice("✅ KRUN RAG 서버 온라인");
+        return;
+      }
+      if (n >= max) {
+        await this.refreshHealth();
+        new Notice("서버가 아직 응답하지 않습니다. 열린 콘솔 창을 확인하세요.");
+        return;
+      }
+      window.setTimeout(tick, 1500);
+    };
+    window.setTimeout(tick, 2500);
   }
 
   private async runReindex(): Promise<void> {
@@ -147,6 +304,21 @@ export class KrunRagView extends ItemView {
     this.convoEl.createDiv({ cls: "krun-rag-empty", text: "질문을 입력하세요." });
   }
 
+  /** Turn the RAG server off. Confirms first — an accidental click means the
+   *  user has to relaunch run_api.bat by hand. */
+  private async shutdownServer(): Promise<void> {
+    const ok = window.confirm("KRUN RAG 서버를 종료할까요?\n다시 사용하려면 run_api.bat 을 실행해야 합니다.");
+    if (!ok) return;
+    const res = await this.api.shutdown();
+    if (res.ok) {
+      new Notice("KRUN RAG 서버를 종료했습니다.");
+    } else {
+      new Notice(`종료하지 못했습니다: ${res.message ?? "서버 응답 없음"}`);
+    }
+    // The server exits ~0.3s after acking; let health flip to offline.
+    setTimeout(() => this.refreshHealth(), 1500);
+  }
+
   private cancel(): void {
     if (this.currentAbort) {
       this.currentAbort.abort();
@@ -159,17 +331,30 @@ export class KrunRagView extends ItemView {
   private submit(): void {
     const q = this.inputEl.value.trim();
     if (!q) return;
+    this.inputEl.value = "";
+    this.run(q, {});
+  }
+
+  /** Public: pre-meeting briefing for one company (command palette).
+   *
+   * Sends `mode: "company_brief"` so the server skips the analyzer — a bare
+   * company name would otherwise yield no filter at all.
+   */
+  runCompanyBrief(company: string): void {
+    this.run(`${company} — 미팅 전 브리핑`, { mode: "company_brief", company });
+  }
+
+  private run(question: string, extra: Partial<AskRequest>): void {
     if (this.currentAbort) {
       new Notice("이전 요청이 진행 중입니다.");
       return;
     }
-    this.inputEl.value = "";
 
     // Strip empty placeholder if present
     const empty = this.convoEl.querySelector(".krun-rag-empty");
     if (empty) empty.remove();
 
-    const turn = this.appendTurn(q);
+    const turn = this.appendTurn(question);
     const activeFile = this.app.workspace.getActiveFile();
     const activeNote = this.plugin.settings.sendActiveNote && activeFile ? activeFile.path : null;
 
@@ -177,12 +362,13 @@ export class KrunRagView extends ItemView {
     this.askBtn.setText("Streaming…");
     this.currentAbort = this.api.ask(
       {
-        query: q,
+        query: question,
         top_k: this.plugin.settings.topK,
         no_analyze: this.plugin.settings.noAnalyze,
         reranker: this.plugin.settings.rerankerEnabled,
         max_chunks_per_file: this.plugin.settings.maxChunksPerFile,
         active_note: activeNote,
+        ...extra,
       },
       {
         onAnalysis: (a) => {
@@ -201,7 +387,9 @@ export class KrunRagView extends ItemView {
           this.renderAnswerStreaming(turn);
         },
         onDone: (info) => {
+          turn.usedIndices = info.used_citation_indices ?? [];
           this.renderAnswerFinal(turn);
+          this.renderCitations(turn); // re-render: hides unused cards now that we know which [n] were cited
           const meta = turn.metaEl.textContent ?? "";
           turn.metaEl.setText(`${meta ? meta + " · " : ""}⏱ ${info.elapsed_seconds}s`);
           this.askBtn.disabled = false;
@@ -210,7 +398,16 @@ export class KrunRagView extends ItemView {
         },
         onError: (msg) => {
           turn.answerEl.empty();
-          turn.answerEl.createDiv({ cls: "krun-rag-error", text: `오류: ${msg}` });
+          if (this.isConnectionError(msg)) {
+            // A bare "Failed to fetch" means the server is unreachable (usually
+            // off), not a query error. Say so and point at the on/off control.
+            const box = turn.answerEl.createDiv({ cls: "krun-rag-error" });
+            box.createDiv({ text: "⚠️ 서버에 연결할 수 없습니다 — RAG 서버가 꺼져 있는 것 같습니다." });
+            box.createDiv({ text: "위 상태 표시(●)를 클릭해 ‘서버 시작’을 누른 뒤 다시 질문하세요." });
+            this.refreshHealth(); // flip the pill to offline if it was stale
+          } else {
+            turn.answerEl.createDiv({ cls: "krun-rag-error", text: `오류: ${msg}` });
+          }
           this.askBtn.disabled = false;
           this.askBtn.setText("Ask (Ctrl/⌘+Enter)");
           this.currentAbort = null;
@@ -333,9 +530,19 @@ export class KrunRagView extends ItemView {
     const old = turn.answerEl.parentElement?.querySelector(".krun-rag-citations");
     if (old) old.remove();
     if (!turn.citations.length) return;
+    // After `done`, restrict to the citations the answer actually cites.
+    // Before `done` (during streaming), show all retrieved cards.
+    const visible = turn.usedIndices && turn.usedIndices.length
+      ? turn.citations.filter((c) => turn.usedIndices!.includes(c.n))
+      : turn.citations;
+    if (!visible.length) return;
     const block = turn.answerEl.parentElement!.createDiv({ cls: "krun-rag-citations" });
-    block.createDiv({ cls: "krun-rag-citations-header", text: `Sources (${turn.citations.length})` });
-    for (const c of turn.citations) {
+    const total = turn.citations.length;
+    const headerText = visible.length < total
+      ? `Sources (${visible.length} cited / ${total} retrieved)`
+      : `Sources (${total})`;
+    block.createDiv({ cls: "krun-rag-citations-header", text: headerText });
+    for (const c of visible) {
       const row = block.createDiv({ cls: "krun-rag-citation" });
       // Only the title is clickable — meta/snippet are plain selectable text
       // so the user can drag-select inside the citation card without

@@ -13,6 +13,7 @@ Pipeline:
 
 from __future__ import annotations
 
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 
@@ -37,13 +38,35 @@ class HybridSearchResult:
     diversified: bool = False
     distinct_files: int = 0
     augmented_files: int = 0  # head chunks added via filter-aware breadth augmentation
-    mode: str = "hybrid"  # "hybrid" | "enumerate"
+    mode: str = "hybrid"  # "hybrid" | "enumerate" | "company_brief"
 
 
 # --- Enumerate mode: pure metadata WHERE, one chunk per file --------------
 # 200 covers "올해 미팅" (~88 files) and most year-scoped enumerations while
 # keeping total tokens (head chunks only, ~500 tokens each) under ~100K.
 ENUMERATE_LIMIT = 200
+
+
+def _safe_str(v) -> str:
+    """NaN-safe stringification. pandas leaks float('nan') for missing string
+    columns, and NaN is truthy, so `r.get(k) or ""` doesn't catch it — but
+    comparing NaN to a real str during sort raises TypeError."""
+    if v is None:
+        return ""
+    if isinstance(v, float) and v != v:  # NaN check
+        return ""
+    return str(v)
+
+
+def _safe_int(v) -> int:
+    if v is None:
+        return 0
+    if isinstance(v, float) and v != v:
+        return 0
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return 0
 
 
 def enumerate_search(
@@ -58,37 +81,23 @@ def enumerate_search(
     so that the answer reflects the full set of matching files, not the top-K
     semantically-ranked chunks.
 
-    Implementation: first pass narrows to the head chunk per file
-    (`chunk_idx = 0`) since one row per file is plenty for an enumeration
-    answer and that's where the breadcrumb + most useful summary lives.
-    Falls back to a wide-pool dedupe if the head-chunk constraint returns
-    nothing (e.g., for date ranges where files happen to have all chunks
-    at idx > 0 — shouldn't happen with our chunker, but safe).
-    """
-    head_where = f"({where}) AND chunk_idx = 0"
-    rows = store.search_by_filter(head_where, limit=limit * 4)
-    if rows:
-        rows.sort(key=lambda r: (r.get("date") or "", r.get("file_path") or ""))
-        # Dedupe defensively in case a file has multiple chunk_idx=0 rows.
-        seen: set[str] = set()
-        out: list[dict] = []
-        for r in rows:
-            fp = r.get("file_path") or ""
-            if fp in seen:
-                continue
-            seen.add(fp)
-            out.append(r)
-            if len(out) >= limit:
-                break
-        return out
+    Implementation: pull every matching row and keep each file's *lowest*
+    chunk_idx.
 
-    # Fallback: pull a very wide pool and dedupe manually.
+    This used to filter on `chunk_idx = 0` in SQL, with a whole-query fallback
+    if that returned nothing. That fallback couldn't help the real failure
+    mode, which is per-file: purging body-less chunks (an H1 heading with no
+    text under it is very common in these template-driven notes) removes some
+    files' index-0 row while leaving others intact, so those files silently
+    vanished from every enumeration and company briefing. Selecting the lowest
+    surviving index per file is correct whether or not gaps exist.
+    """
     rows = store.search_by_filter(where, limit=10000)
-    rows.sort(key=lambda r: (r.get("date") or "", r.get("file_path") or "", r.get("chunk_idx") or 0))
+    rows.sort(key=lambda r: (_safe_str(r.get("date")), _safe_str(r.get("file_path")), _safe_int(r.get("chunk_idx"))))
     seen2: set[str] = set()
     out2: list[dict] = []
     for r in rows:
-        fp = r.get("file_path") or ""
+        fp = _safe_str(r.get("file_path"))
         if fp in seen2:
             continue
         seen2.add(fp)
@@ -127,6 +136,45 @@ def _diversify_by_file(rows: list[dict], max_per_file: int, top_k: int) -> list[
     return out
 
 
+def _strip_filter_entities(query: str, analysis) -> str:
+    """Drop company/person names that WHERE already filters on.
+
+    Only the names the analyzer actually put into the filter are removed — a
+    name mentioned in the query but not extracted still carries signal and
+    stays. Alias variants are stripped too, since the user may type "지엘캠"
+    while the filter resolved to "지엘켐".
+
+    Returns "" when stripping would leave nothing meaningful behind; the caller
+    treats that as "no second pass" rather than searching on an empty string.
+    """
+    if analysis is None:
+        return ""
+    names: list[str] = []
+    for attr in ("companies", "persons"):
+        for n in getattr(analysis, attr, None) or []:
+            if not n:
+                continue
+            names.append(str(n))
+            try:
+                from rag.aliases import all_variants
+
+                names.extend(all_variants(str(n), kind=attr) or [])
+            except Exception:  # aliases are an enhancement, never a hard dep
+                pass
+    if not names:
+        return ""
+
+    out = query
+    # Longest first so "레디로버스트머신" is removed before a shorter alias
+    # could carve it into fragments.
+    for n in sorted({n for n in names if n}, key=len, reverse=True):
+        out = re.sub(re.escape(n), " ", out, flags=re.IGNORECASE)
+    out = re.sub(r"\s+", " ", out).strip()
+
+    # A residue of one short token ("의", "관련") is noise, not a query.
+    return out if len(out) >= 2 else ""
+
+
 # --- WHERE clause builder --------------------------------------------------
 def _q(s: str) -> str:
     """Single-quote-escape for LanceDB SQL."""
@@ -161,15 +209,38 @@ def build_where_clause(analysis: QueryAnalysis | None) -> str | None:
         joined = ", ".join(f"'{_q(c)}'" for c in expanded)
         parts.append(f"company IN ({joined})")
     if analysis.persons:
-        seen_p: set[str] = set()
-        expanded_p: list[str] = []
+        # Person filter is deliberately title-insensitive and broad. Indexed
+        # `person` values carry the title ("강규식 상무"), but a query often omits
+        # it ("강규식"). We match the base name plus any trailing title via LIKE,
+        # so "최원석" and "최원석 전무" resolve to the same person — and the
+        # person's master note (whose 만남 표 already aggregates golf/travel/meal
+        # encounters, not just formal meetings) reliably surfaces.
+        from rag.aliases import strip_person_title
+
+        conds: list[str] = []
+        seen_c: set[tuple[str, str]] = set()
+
+        def _add_eq(v: str) -> None:
+            v = v.strip()
+            if v and ("eq", v) not in seen_c:
+                seen_c.add(("eq", v))
+                conds.append(f"person = '{_q(v)}'")
+
+        def _add_like(base: str) -> None:
+            base = base.strip()
+            if base and ("like", base) not in seen_c:
+                seen_c.add(("like", base))
+                # base followed by a space + title token(s) → "<base> 전무" etc.
+                conds.append(f"person LIKE '{_q(base)} %'")
+
         for p in analysis.persons:
-            for v in all_variants(p, kind="persons"):
-                if v not in seen_p:
-                    seen_p.add(v)
-                    expanded_p.append(v)
-        joined = ", ".join(f"'{_q(p)}'" for p in expanded_p)
-        parts.append(f"person IN ({joined})")
+            for v in all_variants(p, kind="persons") or [p]:
+                _add_eq(v)                       # exact form as given / aliased
+                base = strip_person_title(v)
+                _add_eq(base)                    # title-less indexed values
+                _add_like(base)                  # any title suffix
+        if conds:
+            parts.append("(" + " OR ".join(conds) + ")")
     if analysis.date_from:
         parts.append(f"date >= '{_q(analysis.date_from)}'")
     if analysis.date_to:
@@ -180,6 +251,114 @@ def build_where_clause(analysis: QueryAnalysis | None) -> str | None:
     # word 시너지 reads as "synergy"). The resulting narrow WHERE drops the
     # actual answer files. enumerate mode does its own doc_type handling.
     return " AND ".join(parts) if parts else None
+
+
+# --- Company brief mode ----------------------------------------------------
+# Pre-meeting context restore for a single company: every note filed under that
+# company (complete list, no semantic ranking) plus the *full* text of the most
+# recent few so the answer can cover risks/conclusions/open items — head chunks
+# alone are usually just the attendee list.
+COMPANY_BRIEF_DEEP_FILES = 5
+# Character budget for the deep-loaded files. Korean runs ~1-1.5 chars/token, so
+# 90K chars is roughly 60-90K tokens — well inside the context window while
+# leaving room for the head chunks of older notes, which are never dropped.
+COMPANY_BRIEF_CHAR_BUDGET = 90_000
+
+
+def build_company_where(company: str) -> str:
+    """`company IN (...)` expanded across the alias table.
+
+    Scope is deliberately metadata-only: notes whose `company` field is set.
+    Passing mentions inside other companies' notes have `company = NULL` and are
+    out of scope by design — the briefing answers "미팅한 이력", not "언급된 곳".
+    No doc_type filter: 예비검토보고서 and other resource-typed notes carry real
+    deal context and would be lost by narrowing to meeting/company.
+    """
+    from rag.aliases import all_variants
+
+    variants = all_variants(company, kind="companies") or [company]
+    joined = ", ".join(f"'{_q(v)}'" for v in dict.fromkeys(variants))
+    return f"company IN ({joined})"
+
+
+def company_brief_search(
+    *,
+    company: str,
+    store: VaultChunkStore | None = None,
+    deep_files: int = COMPANY_BRIEF_DEEP_FILES,
+    char_budget: int = COMPANY_BRIEF_CHAR_BUDGET,
+) -> HybridSearchResult:
+    """Two-stage retrieval: complete file list + deep text for recent notes.
+
+    Stage A (`enumerate_search`) fixes the file list — one head chunk per note,
+    date-ascending, nothing missing. Stage B re-fetches every chunk of the most
+    recent `deep_files` notes. Budget is spent newest-first, but rows come back
+    chronologically so citation numbers read as a timeline.
+    """
+    store = store or open_store()
+    where = build_company_where(company)
+    heads = enumerate_search(where=where, store=store, limit=ENUMERATE_LIMIT)
+    if not heads:
+        return HybridSearchResult(
+            rows=[],
+            where_clause=where,
+            bm25_hit_count=0,
+            vector_hit_count=0,
+            fused_count=0,
+            mode="company_brief",
+        )
+
+    ordered_paths = [_safe_str(r.get("file_path")) for r in heads]  # date-asc
+    head_by_path = {_safe_str(r.get("file_path")): r for r in heads}
+    deep_paths = ordered_paths[-deep_files:] if deep_files > 0 else []
+
+    by_path: dict[str, list[dict]] = {}
+    if deep_paths:
+        joined = ", ".join(f"'{_q(p)}'" for p in deep_paths)
+        full = store.search_by_filter(
+            f"({where}) AND file_path IN ({joined})", limit=5000
+        )
+        for r in full:
+            by_path.setdefault(_safe_str(r.get("file_path")), []).append(r)
+        for chunks in by_path.values():
+            chunks.sort(key=lambda r: _safe_int(r.get("chunk_idx")))
+
+    # Spend the budget newest-first. A file that doesn't fit degrades to its
+    # head chunk rather than disappearing — completeness of the list wins.
+    selected: dict[str, list[dict]] = {}
+    deep_used = 0
+    for path in reversed(ordered_paths):
+        chunks = by_path.get(path)
+        if chunks:
+            cost = sum(len(_safe_str(c.get("text"))) for c in chunks)
+            if deep_used + cost <= char_budget:
+                selected[path] = chunks
+                deep_used += cost
+                continue
+        head = head_by_path.get(path)
+        if head is not None:
+            selected[path] = [head]
+
+    rows: list[dict] = []
+    seen_chunks: set[str] = set()
+    for path in ordered_paths:  # chronological output
+        for c in selected.get(path, []):
+            cid = _safe_str(c.get("chunk_id"))
+            if cid and cid in seen_chunks:
+                continue
+            if cid:
+                seen_chunks.add(cid)
+            rows.append(c)
+
+    return HybridSearchResult(
+        rows=rows,
+        where_clause=where,
+        bm25_hit_count=0,
+        vector_hit_count=0,
+        fused_count=len(rows),
+        distinct_files=len(selected),
+        mode="company_brief",
+    )
 
 
 # --- Reciprocal Rank Fusion ------------------------------------------------
@@ -231,21 +410,20 @@ def hybrid_search(
     if (
         analysis is not None
         and getattr(analysis, "intent", "lookup") == "enumerate"
-        and (where or analysis.doc_types)
+        and where  # require a structural narrowing (date/company/person);
+        # doc_types-only enumeration is too broad and dumps random head chunks
+        # for content-conditional queries like "남부권에 해당하는 회사 리스트".
     ):
         # In enumerate mode we DO honor doc_type from the analyzer (unlike the
         # default hybrid path), because narrowing to e.g. only meeting notes is
         # exactly what gives a clean enumerable list. When there's no other
         # WHERE filter (e.g. "Antonio가 투자한 업체들 모두" → just doc_types=
         # ["company"]), the doc_type clause alone carries the enumeration.
-        if where and analysis.doc_types:
+        if analysis.doc_types:
             joined = ", ".join(f"'{_q(t)}'" for t in analysis.doc_types)
             enum_where = f"({where}) AND doc_type IN ({joined})"
-        elif where:
+        else:
             enum_where = where
-        else:  # doc_types only
-            joined = ", ".join(f"'{_q(t)}'" for t in analysis.doc_types)
-            enum_where = f"doc_type IN ({joined})"
         rows = enumerate_search(where=enum_where, store=store, limit=ENUMERATE_LIMIT)
         return HybridSearchResult(
             rows=rows,
@@ -266,6 +444,23 @@ def hybrid_search(
     vector_rows = store.vector_search(qvec, limit=cfg.vector_top_k, where=where)
     vector_ids = [r["chunk_id"] for r in vector_rows]
 
+    # 2b. Entity-stripped vector pass.
+    # Once WHERE has narrowed the corpus to one company, every candidate shares
+    # that name — it carries no discriminating signal, but the embedding still
+    # weights it, which favours documents that *repeat* the name (index notes,
+    # "투자 검토 요약" sections) over the meeting chunk that answers the
+    # question. Measured on "레디로버스트머신 투심 지적사항": the chunk holding
+    # the actual criticisms ranked 42/115, while dropping the company name from
+    # the query moved comparable content into the top 10.
+    # Fusing both passes rather than replacing keeps the name-bearing overview
+    # chunks available for questions that genuinely want them ("회사 개요").
+    stripped_ids: list[str] = []
+    stripped = _strip_filter_entities(rewritten, analysis)
+    if where and stripped and stripped != rewritten:
+        svec = embedder.encode([stripped])[0]
+        stripped_rows = store.vector_search(svec, limit=cfg.vector_top_k, where=where)
+        stripped_ids = [r["chunk_id"] for r in stripped_rows]
+
     # 3. Apply WHERE to BM25 results post-hoc (BM25 has no metadata index).
     if where and bm25_ids:
         kept_ids: set[str] = set()
@@ -279,10 +474,22 @@ def hybrid_search(
 
     # 4. Fuse
     if not bm25_ids and not vector_ids:
-        return HybridSearchResult(
-            rows=[], where_clause=where,
-            bm25_hit_count=0, vector_hit_count=0, fused_count=0,
-        )
+        # Empty-result fallback: when WHERE was non-trivial, retry without it.
+        # Common cause: analyzer extracts a name into `companies` / `persons`
+        # that doesn't match any structured metadata (e.g. "로텀 관련한 내용" →
+        # companies=['로텀'], but 로텀 is only mentioned inside a person meeting
+        # note where the chunk's `company` field is NULL). BM25/vector without
+        # the filter usually find the right chunk by content.
+        if where:
+            bm25_ids = [cid for cid, _ in bm25.search(rewritten, top_k=cfg.bm25_top_k)]
+            vector_rows = store.vector_search(qvec, limit=cfg.vector_top_k, where=None)
+            vector_ids = [r["chunk_id"] for r in vector_rows]
+            where = None  # downstream steps (augmentation, etc.) skip filter
+        if not bm25_ids and not vector_ids:
+            return HybridSearchResult(
+                rows=[], where_clause=where,
+                bm25_hit_count=0, vector_hit_count=0, fused_count=0,
+            )
 
     # We always fuse to a larger pool than `final_top_k` so that diversification
     # and (optional) reranking have headroom. When the reranker is on, this
@@ -298,7 +505,10 @@ def hybrid_search(
     max_per_file = getattr(cfg, "max_chunks_per_file", 0) or 0
     diversify = max_per_file > 0
     pool_size = max(cfg.bm25_top_k, cfg.vector_top_k) if (use_reranker or diversify) else cfg.final_top_k
-    fused = rrf_fuse([bm25_ids, vector_ids], k=cfg.rrf_k, top_k=pool_size)
+    ranked_lists = [bm25_ids, vector_ids]
+    if stripped_ids:
+        ranked_lists.append(stripped_ids)
+    fused = rrf_fuse(ranked_lists, k=cfg.rrf_k, top_k=pool_size)
     fused_ids = [cid for cid, _ in fused]
 
     # 5. Hydrate full rows for the fused IDs.
@@ -314,14 +524,19 @@ def hybrid_search(
     # small set of files (e.g. company='메타씨앤아이'), the pool can be filled
     # entirely by chunks from one chunk-rich file (the company profile note),
     # leaving zero shot for sibling meeting notes to reach top-K via
-    # diversification. We append head chunks (chunk_idx=0) of WHERE-matching
-    # files that the pool doesn't yet cover, so diversification can distribute
-    # representation across all matching files. Only meaningful when
-    # diversification is on (otherwise pool[:top_k] never sees the appended rows).
+    # diversification. We append each WHERE-matching file's first surviving
+    # chunk when the pool doesn't already cover that file, so diversification
+    # can distribute representation across all matching files. Only meaningful
+    # when diversification is on (otherwise pool[:top_k] never sees them).
+    #
+    # `enumerate_search` picks the lowest chunk_idx per file rather than a
+    # literal chunk_idx == 0, so files whose index-0 chunk was purged as
+    # body-less are still represented here.
     if where and diversify:
         pool_files = {r.get("file_path") or "" for r in pool}
-        head_where = f"({where}) AND chunk_idx = 0"
-        head_rows = store.search_by_filter(head_where, limit=cfg.final_top_k * 4)
+        head_rows = enumerate_search(
+            where=where, store=store, limit=cfg.final_top_k * 4
+        )
         # Order by date desc so the most recent siblings get added first when capped.
         # NaN-safe: date can be NaN (float) when missing; coerce to "" for sort.
         def _sort_key(r):

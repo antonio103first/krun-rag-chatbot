@@ -69,6 +69,35 @@ def all_variants(name: str, *, kind: str = "companies") -> list[str]:
     return [canon, *bucket]
 
 
+# Korean position/title tokens that trail a personal name in the vault
+# (folder/file names are like "강규식 상무", "강진영 변호사"). Stripping these
+# lets "최원석" and "최원석 전무" resolve to the same person. Mirrors the
+# automation's KOREAN_TITLES (person_property_sync).
+KOREAN_TITLES: frozenset[str] = frozenset({
+    "회장", "부회장", "사장", "부사장", "대표", "대표이사", "총괄", "사업부장",
+    "전무", "상무", "이사", "사외이사", "감사", "고문", "자문", "본부장", "실장",
+    "센터장", "소장", "원장", "부장", "차장", "과장", "팀장", "파트장", "대리",
+    "주임", "사원", "선임", "책임", "수석", "위원", "위원장", "심사역", "매니저",
+    "프로", "변호사", "회계사", "변리사", "세무사", "박사", "교수", "연구원",
+    "기자", "국장", "실장", "처장", "청장", "차관", "장관", "의원", "지사장",
+    "지점장", "본부장", "CEO", "CFO", "CTO", "COO", "CMO", "CIO",
+})
+
+
+def strip_person_title(name: str) -> str:
+    """Drop trailing Korean title tokens: "최원석 전무" → "최원석".
+
+    Leaves single-token names and title-less names unchanged. Only trailing
+    tokens that are known titles are removed (so "김 민수" is not touched).
+    """
+    if not name:
+        return name
+    toks = name.split()
+    while len(toks) > 1 and toks[-1] in KOREAN_TITLES:
+        toks.pop()
+    return " ".join(toks)
+
+
 def mention_count(text: str, names: Iterable[str]) -> int:
     """Total case-insensitive substring count of any of `names` in `text`."""
     if not text or not names:

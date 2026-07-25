@@ -19,5 +19,9 @@ companies:
     - ISTN
     - ISTM
     - INF컨설팅           # 2025-10 합병 흡수
+  지엘켐:
+    - 지엘캠              # 오타 (ㅐ/ㅔ). 2026-07-19 폴더 통합, 주간회의록 전사본에 잔존
+    - GL Chem
+    - glchem
 
 persons: {}
