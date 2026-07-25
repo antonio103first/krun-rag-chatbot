@@ -209,15 +209,38 @@ def build_where_clause(analysis: QueryAnalysis | None) -> str | None:
         joined = ", ".join(f"'{_q(c)}'" for c in expanded)
         parts.append(f"company IN ({joined})")
     if analysis.persons:
-        seen_p: set[str] = set()
-        expanded_p: list[str] = []
+        # Person filter is deliberately title-insensitive and broad. Indexed
+        # `person` values carry the title ("강규식 상무"), but a query often omits
+        # it ("강규식"). We match the base name plus any trailing title via LIKE,
+        # so "최원석" and "최원석 전무" resolve to the same person — and the
+        # person's master note (whose 만남 표 already aggregates golf/travel/meal
+        # encounters, not just formal meetings) reliably surfaces.
+        from rag.aliases import strip_person_title
+
+        conds: list[str] = []
+        seen_c: set[tuple[str, str]] = set()
+
+        def _add_eq(v: str) -> None:
+            v = v.strip()
+            if v and ("eq", v) not in seen_c:
+                seen_c.add(("eq", v))
+                conds.append(f"person = '{_q(v)}'")
+
+        def _add_like(base: str) -> None:
+            base = base.strip()
+            if base and ("like", base) not in seen_c:
+                seen_c.add(("like", base))
+                # base followed by a space + title token(s) → "<base> 전무" etc.
+                conds.append(f"person LIKE '{_q(base)} %'")
+
         for p in analysis.persons:
-            for v in all_variants(p, kind="persons"):
-                if v not in seen_p:
-                    seen_p.add(v)
-                    expanded_p.append(v)
-        joined = ", ".join(f"'{_q(p)}'" for p in expanded_p)
-        parts.append(f"person IN ({joined})")
+            for v in all_variants(p, kind="persons") or [p]:
+                _add_eq(v)                       # exact form as given / aliased
+                base = strip_person_title(v)
+                _add_eq(base)                    # title-less indexed values
+                _add_like(base)                  # any title suffix
+        if conds:
+            parts.append("(" + " OR ".join(conds) + ")")
     if analysis.date_from:
         parts.append(f"date >= '{_q(analysis.date_from)}'")
     if analysis.date_to:

@@ -161,6 +161,39 @@ refresh. The old standalone `⏻ 서버 종료` toolbar button is folded into th
   OS level in a scrubbed-PATH (Obsidian-like) env; the in-Obsidian click UI still
   relies on the user to confirm after reloading the plugin.
 
+### Person search: title-insensitive + golf/travel scope (2026-07-25)
+
+Person queries were too narrow on two axes: (1) indexed `person` carries the
+title ("강규식 상무"), so a bare "강규식" matched nothing; (2) the `person IN (...)`
+WHERE is a hard prefilter that only hits `02_Persons` notes.
+
+- **Title-insensitive match.** `rag/aliases.py` adds `KOREAN_TITLES` +
+  `strip_person_title()` ("최원석 전무" → "최원석"). `build_where_clause` now emits
+  `(person = 'X' OR person LIKE 'X %')` per person, so "X" and "X 전무" resolve to
+  the same person. Verified LanceDB/DataFusion supports `LIKE`; `person = '강규식'`
+  → 0 rows, `person LIKE '강규식 %'` → the 강규식 상무 notes.
+- **Golf/travel/meal scope.** No re-index needed: the person's master note
+  (`02_Persons/{name}/{name}.md`) already aggregates *every* encounter type in
+  its 만남 표 (daily_mention_sync pulls all 👥 만남 기록 lines — 골프/여행/식사/
+  티타임/미팅). Once the title-insensitive filter reliably surfaces that master
+  note, the golf/travel content comes with it. Verified: bare "김태환" → the
+  "김태환 심사역" note, answer includes the 가평베네스트 golf round + score.
+- **Limitation.** Standalone golf/travel *files* (`06_Resources/골프/…`, score/
+  course; travel itineraries) have empty participant metadata (`players: []`), so
+  they stay outside the person filter — only the encounter *context* (via the
+  master note) is in scope. Tagging + re-indexing those files is a separate job.
+- Touches `rag/aliases.py`, `rag/retrieval/hybrid_search.py`. Server restart
+  applies it (running instance was restarted).
+
+### Plugin: friendly offline error (2026-07-25)
+
+A question asked while the server is down surfaced a cryptic
+`오류: TypeError: Failed to fetch`. `src/view.ts` now detects connection errors
+(`isConnectionError`: failed-to-fetch / fetch-failed / NetworkError / TypeError)
+and shows "서버에 연결할 수 없습니다 — 상태 표시(●)를 클릭해 서버 시작하세요" plus
+flips the pill to offline. Real server errors (502, quota) still pass through
+verbatim. 5-case classification verified.
+
 <details><summary>Previous status header (2026-05-02)</summary>
 
 ## Phase table (last updated: 2026-05-02 — Phase 2 session +1, post field-test bug fixes)

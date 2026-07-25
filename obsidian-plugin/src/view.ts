@@ -166,6 +166,13 @@ export class KrunRagView extends ItemView {
     }
   }
 
+  /** True when an ask failure is a network/connection error (server down),
+   *  not a real query/generation error. `fetch()` throws "TypeError: Failed to
+   *  fetch" (Chromium), "NetworkError"/"Load failed" (other engines) here. */
+  private isConnectionError(msg: string): boolean {
+    return /failed to fetch|networkerror|load failed|econnrefused|err_connection|typeerror/i.test(msg);
+  }
+
   /** Status-pill menu: start (run_api.bat) when offline, shut down when online. */
   private openServerMenu(evt: MouseEvent): void {
     const online = this.statusEl.hasClass("ok");
@@ -391,7 +398,16 @@ export class KrunRagView extends ItemView {
         },
         onError: (msg) => {
           turn.answerEl.empty();
-          turn.answerEl.createDiv({ cls: "krun-rag-error", text: `오류: ${msg}` });
+          if (this.isConnectionError(msg)) {
+            // A bare "Failed to fetch" means the server is unreachable (usually
+            // off), not a query error. Say so and point at the on/off control.
+            const box = turn.answerEl.createDiv({ cls: "krun-rag-error" });
+            box.createDiv({ text: "⚠️ 서버에 연결할 수 없습니다 — RAG 서버가 꺼져 있는 것 같습니다." });
+            box.createDiv({ text: "위 상태 표시(●)를 클릭해 ‘서버 시작’을 누른 뒤 다시 질문하세요." });
+            this.refreshHealth(); // flip the pill to offline if it was stale
+          } else {
+            turn.answerEl.createDiv({ cls: "krun-rag-error", text: `오류: ${msg}` });
+          }
           this.askBtn.disabled = false;
           this.askBtn.setText("Ask (Ctrl/⌘+Enter)");
           this.currentAbort = null;
