@@ -1,4 +1,4 @@
-import { ItemView, MarkdownRenderer, Notice, TFile, WorkspaceLeaf } from "obsidian";
+import { ItemView, MarkdownRenderer, Menu, Notice, TFile, WorkspaceLeaf } from "obsidian";
 import { AskRequest, CitationOut, KrunRagApi } from "./api";
 import type KrunRagPlugin from "./main";
 
@@ -50,7 +50,11 @@ export class KrunRagView extends ItemView {
     // Header
     const header = root.createDiv({ cls: "krun-rag-header" });
     header.createEl("strong", { text: "KRUN RAG" });
+    // The status pill doubles as the on/off control: click it to start
+    // (run_api.bat) when offline or shut down when online.
     this.statusEl = header.createSpan({ cls: "krun-rag-status", text: "checking…" });
+    this.statusEl.style.cursor = "pointer";
+    this.statusEl.onclick = (e) => this.openServerMenu(e);
 
     // Primary actions — the two things that aren't "type a question".
     const actions = root.createDiv({ cls: "krun-rag-actions" });
@@ -154,12 +158,92 @@ export class KrunRagView extends ItemView {
     if (h.ok) {
       this.statusEl.addClass("ok");
       this.statusEl.setText(`● ${h.rows ?? 0} chunks`);
-      this.statusEl.title = `vault=${h.vault_name ?? "?"}\nmodel=${h.gen_model ?? "?"}\nzdr=${h.zdr_enabled ? "on" : "off"}`;
+      this.statusEl.title = `vault=${h.vault_name ?? "?"}\nmodel=${h.gen_model ?? "?"}\nzdr=${h.zdr_enabled ? "on" : "off"}\n\n클릭: 서버 시작/종료`;
     } else {
       this.statusEl.addClass("bad");
       this.statusEl.setText("● offline");
-      this.statusEl.title = h.error ?? "server unreachable";
+      this.statusEl.title = (h.error ?? "server unreachable") + "\n\n클릭: 서버 시작";
     }
+  }
+
+  /** Status-pill menu: start (run_api.bat) when offline, shut down when online. */
+  private openServerMenu(evt: MouseEvent): void {
+    const online = this.statusEl.hasClass("ok");
+    const menu = new Menu();
+    if (online) {
+      menu.addItem((i) =>
+        i.setTitle("서버 종료").setIcon("power").onClick(() => this.shutdownServer()),
+      );
+    } else {
+      menu.addItem((i) =>
+        i.setTitle("서버 시작 (run_api.bat)").setIcon("play").onClick(() => this.startServer()),
+      );
+    }
+    menu.addSeparator();
+    menu.addItem((i) =>
+      i.setTitle("상태 새로고침").setIcon("refresh-cw").onClick(() => this.refreshHealth()),
+    );
+    menu.showAtMouseEvent(evt);
+  }
+
+  /** Launch the RAG server by running run_api.bat in the background.
+   *
+   * Desktop-only (manifest isDesktopOnly=true). The path contains a space
+   * ("Claude AI_Personal"), which makes `cmd /c "<path>"` self-strip its quotes
+   * and split at the space (verified: the bat never runs). The reliable form is
+   * shell:true with the path pre-quoted — Node wraps it as `cmd /d /s /c
+   * ""<path>""` and /s strips only the outer pair, leaving the path quoted.
+   * Detached + unref so the server outlives Obsidian; then poll /health.
+   */
+  private startServer(): void {
+    const script = this.plugin.settings.serverScriptPath?.trim();
+    if (!script) {
+      new Notice("run_api.bat 경로가 비어 있습니다. 설정에서 지정하세요.");
+      return;
+    }
+    try {
+      // Node require is available in Obsidian's Electron desktop runtime.
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const cp = require("child_process");
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const nodePath = require("path");
+      const child = cp.spawn(`"${script}"`, {
+        cwd: nodePath.dirname(script),
+        shell: true,
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      child.on("error", (e: Error) => new Notice(`서버 시작 실패: ${e.message}`));
+      child.unref();
+      new Notice("KRUN RAG 서버를 백그라운드로 시작합니다… (수 초 대기)");
+      this.statusEl.setText("● starting…");
+      this.pollUntilOnline();
+    } catch (e) {
+      new Notice(`서버 시작 실패: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  /** Poll /health after a start until it responds ok (or we give up). */
+  private pollUntilOnline(): void {
+    let n = 0;
+    const max = 20; // ~30s: model warmup can take several seconds
+    const tick = async () => {
+      n++;
+      const h = await this.api.health();
+      if (h.ok) {
+        await this.refreshHealth();
+        new Notice("✅ KRUN RAG 서버 온라인");
+        return;
+      }
+      if (n >= max) {
+        await this.refreshHealth();
+        new Notice("서버가 아직 응답하지 않습니다. 열린 콘솔 창을 확인하세요.");
+        return;
+      }
+      window.setTimeout(tick, 1500);
+    };
+    window.setTimeout(tick, 2500);
   }
 
   private async runReindex(): Promise<void> {
@@ -175,6 +259,21 @@ export class KrunRagView extends ItemView {
   private clearConversation(): void {
     this.convoEl.empty();
     this.convoEl.createDiv({ cls: "krun-rag-empty", text: "질문을 입력하세요." });
+  }
+
+  /** Turn the RAG server off. Confirms first — an accidental click means the
+   *  user has to relaunch run_api.bat by hand. */
+  private async shutdownServer(): Promise<void> {
+    const ok = window.confirm("KRUN RAG 서버를 종료할까요?\n다시 사용하려면 run_api.bat 을 실행해야 합니다.");
+    if (!ok) return;
+    const res = await this.api.shutdown();
+    if (res.ok) {
+      new Notice("KRUN RAG 서버를 종료했습니다.");
+    } else {
+      new Notice(`종료하지 못했습니다: ${res.message ?? "서버 응답 없음"}`);
+    }
+    // The server exits ~0.3s after acking; let health flip to offline.
+    setTimeout(() => this.refreshHealth(), 1500);
   }
 
   private cancel(): void {

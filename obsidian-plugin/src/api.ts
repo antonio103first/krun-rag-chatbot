@@ -78,6 +78,24 @@ export class KrunRagApi {
     if (!r.ok) throw new Error(`reindex failed: ${r.status} ${await r.text()}`);
   }
 
+  /** Turn the server off via POST /shutdown.
+   *
+   * The server answers 200 (`{stopping:true}`) and exits ~0.3s later, so a
+   * successful response is the "accepted" signal. A 409 means a reindex is
+   * writing — refuse honestly. A network error most likely means the server was
+   * already down, so we report that rather than pretending we stopped it.
+   */
+  async shutdown(): Promise<{ ok: boolean; message?: string }> {
+    try {
+      const r = await fetch(`${this.baseUrl}/shutdown`, { method: "POST" });
+      if (r.status === 409) return { ok: false, message: (await r.text()) || "재색인 중이라 종료할 수 없습니다." };
+      if (!r.ok) return { ok: false, message: `서버가 ${r.status} 반환` };
+      return { ok: true };
+    } catch {
+      return { ok: false, message: "서버에 연결할 수 없습니다 (이미 꺼져 있을 수 있음)." };
+    }
+  }
+
   /** Company names present in the index, note-count desc. Empty on failure. */
   async companies(): Promise<CompanyEntry[]> {
     try {

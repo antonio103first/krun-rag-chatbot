@@ -131,6 +131,27 @@ process start, and the embedder loads lazily on the first query.
 
 `device=cpu` here (no CUDA on this machine); CUDA path unverified.
 
+### Plugin server on/off menu (2026-07-25)
+
+The sidebar status pill (`● N chunks` / `● offline`) is now clickable — it opens
+a menu to **start** the server when offline, **shut it down** when online, or
+refresh. The old standalone `⏻ 서버 종료` toolbar button is folded into this menu.
+
+- Start runs `run_api.bat` in the background (desktop-only via Node
+  `child_process`), then polls `/health` until it comes up. Path is configurable
+  in settings (`serverScriptPath`, default fills in the known path).
+- **Windows quoting gotcha (verified):** the path contains a space
+  (`Claude AI_Personal`), so `cmd /c "<path>"` self-strips its quotes and splits
+  at the space — the bat never runs and the pill sticks on `starting…`. The
+  working form is `cp.spawn('"'+script+'"', {shell:true, detached:true})` → Node
+  emits `cmd /d /s /c ""<path>""` and `/s` strips only the outer pair. `start`
+  fails too (detached = no console to open a window in). Confirmed by process
+  creation-time: OFF → spawn → a python whose CreationDate is *after* the spawn.
+- Touches `src/view.ts` (pill menu, `startServer`, `pollUntilOnline`),
+  `src/api.ts` (`shutdown`), `src/settings.ts` (`serverScriptPath`). Rebuild with
+  `npm run build` and redeploy `main.js`. In-Obsidian click itself is unverified
+  (can't drive the desktop UI); OS-level start/stop and bundle contents are.
+
 <details><summary>Previous status header (2026-05-02)</summary>
 
 ## Phase table (last updated: 2026-05-02 — Phase 2 session +1, post field-test bug fixes)
